@@ -1,0 +1,653 @@
+# Initial sources def ########################
+# Trivialname
+#     address ( on huggingface)
+#     features
+#     subset (if not all or train)
+#     needs_chat_templating
+#     license
+#     citation
+#     bundled subdomains
+##############################################
+
+############################################ Instruction Data  #########################################################
+
+genQA:
+  address: tomg-group-umd/GenQA
+  features: [text]
+  needs_chat_templating: True
+  license: CC BY-NC 4.0
+  citation: https://arxiv.org/abs/2406.10323
+  machine-generated: True
+  model: Gemini
+
+oak:
+  address: tabularisai/oak
+  features: [Prompt, Response]
+  needs_chat_templating: True
+  license: apache-2.0
+  citation: https://arxiv.org/abs/2407.14371
+  machine-generated: True
+  model: [GPT4o, LLaMa3-70B, LLaMa3-8B, Mixtral-8x7B, Gemma-7B, Gemma-2-9B]
+
+StackMathQA:
+  address: math-ai/StackMathQA
+  subset: stackmathqafull-1q1a
+  features: [Q, A]
+  needs_chat_templating: True
+  license: cc-by-4.0
+  citation: https://huggingface.co/datasets/math-ai/StackMathQA
+  machine-generated: False
+
+NuminaMath:
+  address: AI-MO/NuminaMath-CoT
+  features: [messages]
+  needs_chat_templating: True
+  license: cc-by-nc-4.0
+  citation: https://github.com/project-numina/aimo-progress-prize/
+  content: "Math exercises (online exam paper PDFs and mathematics discussion forums)"
+  machine-generated: False
+
+orca-math:
+  address: microsoft/orca-math-word-problems-200k
+  features: [question, answer]
+  needs_chat_templating: True
+  license: mit
+  citation: https://arxiv.org/abs/2402.14830
+  machine-generated: True
+  model: Azure GPT-4 Turbo
+
+TemplateGSM:
+  address: math-ai/TemplateGSM
+  features: [problem, solution_wocode]
+  needs_chat_templating: True
+  license: cc-by-4.0
+  citation: https://github.com/iiis-ai/TemplateMath
+  # content: Data augmentation of GSM-8k via templating
+  machine-generated: True
+  model: template
+
+tome:
+  address: arcee-ai/The-Tome
+  features: [conversations]
+  needs_chat_templating: True
+  license: mit
+  citation:
+  # content: Instruction Data Mix
+  machine-generated:
+  model:
+  bundled-subdomains:
+    - arcee-ai/infini-instruct-top-500k (BAAI/Infinity-Instruct)
+    - TIGER-Lab/WebInstructSub (top-500k)
+    - jondurbin/airoboros-3.2
+    - gardner/glaive-function-calling-v2-sharegpt
+    - arcee-ai/reasoning-sharegpt (SkunkworksAI/reasoning-0.01)
+    - arcee-ai/self-instruct-sharegpt (bigcode/self-oss-instruct-sc2-exec-filter-50k)
+    - cognitivecomputations/ultrainteract_trajectories_sharegpt
+    - cognitivecomputations/SystemChat-2.0
+    - arcee-ai/qwen2-72b-magpie-en
+
+# numini20k:
+#   address: mlabonne/Numini-20k
+#   features: [instruction, output]
+#   needs_chat_templating: True
+#   license:
+#   citation:
+#   content: Math questions
+#   machine-generated:
+#   model:
+
+magpie-ultra:
+  address: argilla/magpie-ultra-v0.1
+  features: [messages]
+  needs_chat_templating: True
+  license: llama3.1
+  citation: https://arxiv.org/abs/2406.08464
+  # content: Misc. instruction data
+  machine-generated: True
+  model: Llama-3.1-405B-instruct
+
+MATH-plus:
+  address: TIGER-Lab/MATH-plus
+  features: [instruction, output]
+  needs_chat_templating: True
+  license: mit
+  citation: https://arxiv.org/abs/2405.03548
+  machine-generated: True
+  model: GPT-4
+  bundled-subdomains:
+    - MetaMath
+    - MATH-orca
+    - MATH-augmented (??)
+
+WebInstruct:
+  address: TIGER-Lab/WebInstructSub
+  features: [question, answer]
+  needs_chat_templating: True
+  license:
+  citation: https://arxiv.org/pdf/2405.03548
+  machine-generated: True
+  model: GPT-4
+  bundled-subdomains:
+    - mathstackexchange
+    - stackexchange
+    - socratic
+
+MathInstruct:
+  address: TIGER-Lab/MathInstruct
+  features: [instruction, output]
+  needs_chat_templating: True
+  license:
+  citation: https://arxiv.org/abs/2309.05653
+  machine-generated: True
+  model: GPT-4
+  bundled-subdomains:
+    - GSM8K (MIT)
+    - GSM8K-RFT (Non listed)
+    - AQuA-RAT (Apache 2.0)
+    - MATH (MIT)
+    - TheoremQA (MIT)
+    - Camel-Math (Attribution-NonCommercial 4.0 International)
+    - NumGLUE (Apache-2.0)
+    - MathQA (Apache-2.0)
+    - Our Curated (MIT)
+
+# ChatQA-sft: # slop
+#   address: nvidia/ChatQA-Training-Data
+#   subset: sft
+#   features: [messages, answers]
+#   needs_chat_templating: True
+#   license: other
+#   citation:
+#   machine-generated: True
+#   model: GPT-3.5-turbo-0613
+
+# ChatQA:
+#   address: nvidia/ChatQA-Training-Data
+#   features: [messages]
+#   needs_chat_templating: True
+#   license: other
+#   citation:
+#   machine-generated: True
+#   model: GPT-3.5-turbo-0613
+#   bundled-subdomains:
+#     - DROP
+#     - NarrativeQA
+#     - NewsQA
+#     - Quoref
+#     - ROPES
+#     - SQuAD1.1
+#     - SQuAD2.0,
+#     - TAT-QA
+#     - Soda
+#     - ELI5
+#     - FLAN
+#     - the FLAN collection
+#     - Self-Instruct
+#     - Unnatural Instructions
+#     - OpenAssistant
+#     - Dolly
+
+open-hermes-2.5:
+  address: teknium/OpenHermes-2.5
+  features: [conversations]
+  needs_chat_templating: True
+  license: other
+  citation: https://huggingface.co/datasets/teknium/OpenHermes-2.5
+  machine-generated: True
+  bundled-subdomains:
+    - Airoboros 2.2
+    - CamelAI Domain Expert Datasets
+    - ChatBot Arena
+    - Collective Cognition
+    - CoT Alpaca GPT4
+    - Evol Instruct 70K && 140K
+    - Glaive Code Assistant
+    - GPT4-LLM
+    - GPTeacher
+    - Medical Tasks
+    - MetaMath 40k
+    - SlimOrca 550K
+    - Platypus
+    - ShareGPT
+    - Unnatural Instructions GPT4
+
+skunkworks-reasoning:
+  address: SkunkworksAI/reasoning-0.01
+  features: [instruction, reasoning, output]
+  needs_chat_templating: True
+  license:
+  citation: https://huggingface.co/datasets/SkunkworksAI/reasoning-0.01
+  machine-generated: True
+
+dart-math:
+  address: hkust-nlp/dart-math-hard
+  features: [query, response]
+  needs_chat_templating: True
+  license: mit
+  citation: https://arxiv.org/abs/2407.13690
+  machine-generated: True
+  model: DeepSeekMath-7B-RL
+
+gsm8k:
+  address: hkust-nlp/gsm8k-fix
+  features: [query, resp]
+  needs_chat_templating: True
+  license: mit
+  citation: https://arxiv.org/abs/2407.13690
+  machine-generated: False
+
+WebInstruct-prometheus:
+  address: chargoddard/WebInstructSub-prometheus
+  features: [instruction, generation]
+  needs_chat_templating: True
+  license: apache-2.0
+  citation: https://arxiv.org/abs/2405.01535
+  machine-generated: True
+  model: GPT-4
+
+hercules:
+  address: Locutusque/hercules-v5.0
+  features: [conversations]
+  needs_chat_templating: True
+  license: other
+  citation: https://huggingface.co/datasets/Locutusque/hercules-v5.0
+  machine-generated: True
+  model:
+  bundled-subdomains:
+    - OpenOrca/SlimOrca
+    - Evol Instruct 70K & 140K
+    - teknium/GPT4-LLM-Cleaned
+    - jondurbin/airoboros-3.2
+    - AlekseyKorshuk/camel-chatml
+    - CollectiveCognition/chats-data-2023-09-22
+    - Lmsys chat 1m GPT-4 generations only.
+    - glaiveai/glaive-code-assistant
+    - Locutusque/function-calling-chatml
+    - garage-bAInd/Open-Platypus
+    - TIGER-Lab/MATH-plus
+    - GPTeacher roleplay datasets
+    - BI55/MedText
+    - Various medical datasets by CogStack
+    - Unnatural Instructions
+    - m-a-p/Code-Feedback
+    - totally-not-an-llm/EverythingLM-data-V3
+    - LDJnr/Capybara
+    - Vezora/Tested-22k-Python-Alpaca
+    - Crystalcareai/alpaca-gpt4-COT
+    - CollectiveCognition/chats-data-2023-09-27
+    - CollectiveCognition/chats-data-2023-10-16
+    - NobodyExistsOnTheInternet/sharegptPIPPA
+    - winglian/chatlogs-en-cleaned
+    - winglian/deduped-ds
+    - grimulkan/theory-of-mind
+    - Locutusque/caseus_custom
+
+OpenMathInstruct:
+  address: nvidia/OpenMathInstruct-1
+  features: [question, expected_answer]
+  needs_chat_templating: True
+  license: nvidia-license(other)
+  citation: https://arxiv.org/abs/2402.10176
+  machine-generated: True
+  model: Mixtral-8x7B
+
+MetaMathQA:
+  address: meta-math/MetaMathQA
+  features: [query, response]
+  needs_chat_templating: True
+  license: mit
+  citation: https://arxiv.org/abs/2309.12284
+  machine-generated: True
+  model: GPT-3.5-Turbo
+
+CodeFeedback:
+  address: m-a-p/CodeFeedback-Filtered-Instruction
+  features: [query, answer]
+  needs_chat_templating: True
+  license: apache-2.0
+  citation: https://arxiv.org/abs/2402.14658
+  machine-generated: True
+  model: Qwen072B-Chat
+  bundled-subdomains:
+    - Magicoder-OSS-Instruct
+    - ShareGPT (Python code subset)
+    - Magicoder-Evol-Instruct
+    - Evol-Instruct-Code
+
+PureDove:
+  address: LDJnr/Pure-Dove
+  features: [conversation]
+  needs_chat_templating: True
+  license: apache-2.0
+  citation: https://huggingface.co/datasets/LDJnr/Capybara
+  machine-generated: True
+  model: GPT-4
+  bundled-subdomains:
+    - ShareGPT
+    - ChatBotArena
+
+Daring-Anteater:
+  address: nvidia/Daring-Anteater
+  features: [conversations]
+  needs_chat_templating: True
+  license: cc-by-4.0
+  citation: https://arxiv.org/abs/2406.08673
+  machine-generated: True
+  model: Mixtral-8x7b-Instruct
+  bundled-subdomains:
+    - synthetic_conv
+    - synthetic_roleplay
+    - synthetic_math
+    - synthetic_precise_instruction_following
+    - synthetic_json_format_following
+    - synthetic_complex_instruction
+    - FinQA
+    - wikitablequestions
+    - Open-Platypus
+
+Nvidia-Blender:
+  address: nvidia/sft_datablend_v1
+  features: [conversations]
+  needs_chat_templating: True
+  license: cc-by-4.0
+  citation: https://huggingface.co/datasets/nvidia/sft_datablend_v1
+  machine-generated: True
+  model:
+  bundled-subdomains:
+    - OASST
+    - CodeContests
+    - MNLI
+    - QNLI
+    - WNLI
+    - BooLQ
+    - DROP
+    - OpenbookQA
+    - SQuAD v1
+    - SQuAD v2
+    - COPA
+    - HellaSwag
+    - PIQA
+    - StoryCloze
+    - ARC
+    - NQ
+    - TriviaQA
+    - Paws Wiki
+    - Winogrande
+    - WSC273
+    - CosmosQA
+    - ReCoRD CNN/Daily Mail
+    - DART
+    - E2ENLG
+    - QuAC
+    - Mathematics
+    - SNLI
+    - Adversarial QA
+    - Amazon Polarity
+    - DBPedia
+    - DuoRC
+    - Hotpot QA
+    - QASC
+    - Quarel
+    - QuaRTz
+    - Quoref
+    - ROPES
+    - Social IQA
+    - Wiki Bio
+    - Wiki Hop
+    - ARB
+    - tigerbot-kaggle-leetcodesolutions-en-2k
+    - SciBench
+    - PRM800K
+    - GSM8K
+
+baai-instruct-foundation:
+  address: BAAI/Infinity-Instruct
+  subset: 7M
+  features: [conversations]
+  needs_chat_templating: True
+  license:
+  citation: https://huggingface.co/datasets/BAAI/Infinity-Instruct
+  machine-generated: True
+  model:
+  bundled-subdomains:
+    - glaiveai/glaive-code-assistant-v3
+    - Replete-AI/code_bagel_hermes-2.5
+    - m-a-p/CodeFeedback-Filtered-Instruction
+    - bigcode/self-oss-instruct-sc2-exec-filter-50k
+    - codefuse-ai/CodeExercise-Python-27k
+    - nickrosh/Evol-Instruct-Code-80k-v1
+    - jinaai/code_exercises
+    - TokenBender/code_instructions_122k_alpaca_style
+    - iamtarun/python_code_instructions_18k_alpaca
+    - Nan-Do/instructional_code-search-net-python
+    - Safurai/Code-Instruct-700k
+    - ajibawa-2023/Python-Code-23k-ShareGPT
+    - jtatman/python-code-dataset-500k
+    - m-a-p/Code-Feedback
+    - TIGER-Lab/MathInstruct
+    - microsoft/orca-math-word-problems-200k
+    - MetaMathQa
+    - teknium/Openhermes-2.5
+    - google/flan
+    - "Selected subjective instructions"
+
+baai-instruct-gen:
+  address: BAAI/Infinity-Instruct
+  subset: Gen
+  features: [conversations]
+  needs_chat_templating: True
+  license:
+  citation: https://huggingface.co/datasets/BAAI/Infinity-Instruct
+  machine-generated: True
+  model:
+  bundled-subdomains:
+    - glaiveai/glaive-code-assistant-v3
+    - Replete-AI/code_bagel_hermes-2.5
+    - m-a-p/CodeFeedback-Filtered-Instruction
+    - bigcode/self-oss-instruct-sc2-exec-filter-50k
+    - codefuse-ai/CodeExercise-Python-27k
+    - nickrosh/Evol-Instruct-Code-80k-v1
+    - jinaai/code_exercises
+    - TokenBender/code_instructions_122k_alpaca_style
+    - iamtarun/python_code_instructions_18k_alpaca
+    - Nan-Do/instructional_code-search-net-python
+    - Safurai/Code-Instruct-700k
+    - ajibawa-2023/Python-Code-23k-ShareGPT
+    - jtatman/python-code-dataset-500k
+    - m-a-p/Code-Feedback
+    - TIGER-Lab/MathInstruct
+    - microsoft/orca-math-word-problems-200k
+    - MetaMathQa
+    - teknium/Openhermes-2.5
+    - google/flan
+    - "Selected subjective instructions"
+
+anthracite-stheno:
+  address: anthracite-org/Stheno-Data-Filtered
+  features: [conversations]
+  needs_chat_templating: True
+  license:
+  citation:
+  machine-generated: True
+  model: Claude-3-opus-20240229
+
+opus-writing:
+  address: Nopm/Opus_WritingStruct
+  features: [messages]
+  needs_chat_templating: True
+  license: apache-2.0
+  citation:
+  machine-generated: True
+  model: Claude-3-opus
+
+math-step:
+  address: xinlai/Math-Step-DPO-10K
+  features: [prompt, full_chosen]
+  needs_chat_templating: True
+  license:
+  citation: https://arxiv.org/abs/2406.18629
+  machine-generated: True
+  model:
+
+bigcode-oss:
+  address: bigcode/self-oss-instruct-sc2-exec-filter-50k
+  features: [instruction, response]
+  needs_chat_templating: True
+  license:
+  citation: https://huggingface.co/blog/sc2-instruct
+  machine-generated: True
+  model: StarCoder2-15B
+
+everyday-conversations:
+  address: HuggingFaceTB/everyday-conversations-llama3.1-2k
+  features: [messages]
+  needs_chat_templating: True
+  license: apache-2.0
+  citation:
+  machine-generated: True
+  model: Llama-3.1-70b-instruct
+
+no-robots:
+  address: HuggingFaceH4/no_robots
+  features: [messages]
+  needs_chat_templating: True
+  license: cc-by-nc-4.0
+  citation: https://arxiv.org/abs/2203.02155
+  machine-generated: False
+
+longwriter:
+  address: THUDM/LongWriter-6k
+  features: [messages]
+  needs_chat_templating: True
+  license:
+  citation: https://arxiv.org/abs/2408.07055
+  machine-generated: True
+  model: GPT-4o
+
+webglm-qa:
+  address: THUDM/webglm-qa
+  features: [question, answer]
+  needs_chat_templating: True
+  license:
+  citation: https://arxiv.org/abs/2306.07906
+
+# WaterHorseChess-chat: # weird broken columns included
+#   subset: chessgpt_sft_data
+#   address: Waterhorse/chess_data
+#   features: [conversations]
+#   needs_chat_templating: False
+#   license: apache-2.0
+#   citation: https://arxiv.org/abs/2306.09200
+#   machine-generated: False
+#   bundled-subdomains:
+#     - ChessGPT Chat
+
+tulu-sft:
+  address: allenai/tulu-v2-sft-mixture-olmo-4096
+  features: ["messages"]
+  needs_chat_templating: True
+  license: odc-by
+  citation: https://arxiv.org/abs/2402.00838
+  machine-generated: True
+  model: many
+  bundled-subdomains:
+    - FLAN
+    - openAssistant
+    - ShareGPT
+    - GPT4-Alpaca
+    - Code-Alpaca
+    - LIMA
+    - WizardLM Evol Instruct
+    - Open-Orca
+    - Hardcoded # need to filter these out!
+    - Science
+
+ArxivInstruct:
+  address: AlgorithmicResearchGroup/ArXivDLInstruct
+  features: [prompt, description, function]
+  needs_chat_templating: True
+  license: mit
+  citation: https://huggingface.co/datasets/AlgorithmicResearchGroup/ArXivDLInstruct
+  machine-generated: True
+  model: unknown
+
+P3:
+  address: bigscience/P3
+  features: ["inputs_pretokenized", "targets_pretokenized"]
+  needs_chat_templating: True
+  license: apache-2.0
+  citation: https://arxiv.org/abs/2110.08207
+  machine-generated: False
+  bundled-subdomains: # ...
+    - CommonsenseQA
+    - DREAM
+    - QUAIL
+    - QuaRTz
+    - Social IQA
+    - WiQA
+    - Cosmos
+    - QASC
+    - Quarel
+    - SciQ
+    - Wiki Hop
+    - ARC
+    - OpenBookQA
+    - MultiRC
+    - PIQA
+    - RACE
+    - HellaSwag
+    - BoolQ
+    - Adversarial QA
+    - Quoref
+    - DuoRC
+    - ROPES
+    - SQuAD v2
+    - ReCoRD
+    - Hotpot QA
+    - Wiki QA
+    - Trivia QA
+    - Web Questions
+    - Common Gen
+    - Wiki Bio
+    - Amazon
+    - App Reviews
+    - IMDB
+    - Rotten Tomatoes
+    - Yelp
+    - CNN Daily Mail
+    - Gigaword
+    - MultiNews
+    - SamSum
+    - XSum
+    - AG News
+    - DBPedia
+    - TREC
+    - MRPC
+    - PAWS
+    - QQP
+    - ANLI
+    - CB
+    - RTE
+    - WSC
+    - Winogrande
+    - WiC
+    - COPA
+    - Story Cloze
+
+OrcaSonnet:
+  address: Gryphe/Sonnet3.5-SlimOrcaDedupCleaned
+  features: [conversations]
+  needs_chat_templating: True
+  license: mit
+  citation: cgato/SlimOrcaDedupCleaned
+  machine-generated: True
+  model: Claude-3-Sonnet
+
+opus-writing:
+  address: Gryphe/Opus-WritingPrompts
+  features: [conversations]
+  needs_chat_templating: True
+  license: unknown
+  citation: 
+  machine-generated: True
+  model: Claude-3-opus

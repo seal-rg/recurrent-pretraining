@@ -1,0 +1,88 @@
+# Baseline config to instantiate a fast gpt-2-like 10b token training runs
+# using yaml because I need to annotate my configs :<
+
+# Main settings
+run_name: baseline
+resume: False # off for now to simplify debugging reruns with the same name. Turn on later!
+max_tokens: 10_000_000_000 # 10 bil
+seed: 233
+out_dir: outputs
+
+# Model configuration
+model_name: magpie-150m
+model_overwrite:
+  vocab_size: 32000
+  mup_model_scaling_factor: 1
+  lockstep_n: True
+  lockstep_k: True
+
+model_impl: dynamic
+block_size: 4096
+
+# Training hyperparameters
+world_batch_size: 1024 # 4mil token
+batch_size_ramp: 65536 # 32768
+optimizer: ELLISAdam
+optim_config:
+  lr: 4e-4 # 1e-3
+  weight_decay: 2e-5
+  betas:
+    - 0.9
+    - 0.95 # conservative
+  # eps: 1e-8 # removed as a factor
+  update_clipping: True
+  atan_adam: True
+  running_init: True
+  tensor_wise_finite_check: False # True is a recipe for wasting compute
+  tensor_wise_gradient_normalization: False
+  decouple_wd: True
+
+min_lr: 0
+warmup_steps: 4096 # can we make this into a fraction?
+lr_schedule: trapezoid
+cooldown_steps: 4096
+no_weight_decay_for_bias_and_norm_params: True
+
+# Regularization
+z_regularization: 0
+
+# Implementation and backend
+micro_batch_size: 8
+compile_model: True
+gradient_checkpointing: False # is this a win at this scale?
+loss_guardrail_active: True
+skip_nonfinite_grads: True
+
+# Logging
+logger_project: "incite-arch"
+model_telemetry: True # telemetry on attention turned off for now
+shape_watching_steps: 0
+log_step_interval: 256
+save_step_interval: 10000000
+eval_step_interval: 2048
+eval_iters: 64
+save_last_step: True
+
+partial_depth_eval: [1, 4, 8, 16, 64]
+
+# Data Handling
+all_block_size_tensors: True
+pad_to_block_size: True
+data_config:
+  train_data:
+    - type: pkds
+      prefix: ""
+      weight: 1
+      data_dir: "$DATA_DIR/fineweb-sample/packed2"
+  val_data:
+    - type: pkds
+      prefix: ""
+      weight: 1
+      data_dir: "$DATA_DIR/fineweb-sample/packed2" # todo: carve out a val split
+      # on frontier set # $DATA_DIR to /lustre/orion/csc569/proj-shared/language_datasets/processed to get this
+
+# tokenizer_path: "meta-llama/Meta-Llama-3-8B"
+tokenizer_path: "/fast/jgeiping/models/Llama-2-7b-hf"
+#
+# todo:
+# * "Cut llama-3 tokenizer down to 65k"?

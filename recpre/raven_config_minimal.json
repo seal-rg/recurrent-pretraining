@@ -1,0 +1,46 @@
+{
+    "name": "nebel-raven-3.5b",
+    "architectures": [
+    "RavenForCausalLM"
+  ],
+  "auto_map": {
+    "AutoConfig": "raven_config_minimal.RavenConfig",
+    "AutoModelForCausalLM": "raven_modeling_minimal.RavenForCausalLM"
+  },
+   "torch_dtype": "bfloat16",
+   "transformers_version": "4.28.1",
+    "hf_config": {
+    "org": "tomg-group-umd",
+    "name": "nebel-raven-3.5b"
+    },
+    "model_type": "huginn_raven",
+    "block_size": 4096,
+    "vocab_size": 65536,
+    "padding_multiple": 4096,
+    "tie_embeddings": true,
+    "num_attention_heads": 55,
+    "num_key_value_heads": 55,
+    "n_embd": 5280,
+    "intermediate_size": 17920,
+    "bias": false,
+    "architecture_class_name": "RecurrentGPT",
+    "block_class_name": "SandwichBlock",
+    "norm_class_name": "RMSNorm_llama",
+    "norm_eps": 0.000001,
+    "mlp_class_name": "GatedMLP",
+    "nonlin_name": "SiLU",
+    "init_strategy": "takase",
+    "init_orthogonal": false,
+    "state_init": "like-init",
+    "injection_type": "linear",
+    "n_layers_in_recurrent_block": 4,
+    "mean_recurrence": 32,
+    "sampling_scheme": "poisson-lognormal-filling",
+    "mean_backprop_depth": 8,
+    "n_layers_in_prelude": 2,
+    "n_layers_in_coda": 2,
+    "qk_bias": true,
+    "activation_checkpoint_impl": "per-iteration"
+    }
+        
+        

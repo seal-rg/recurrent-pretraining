@@ -1,0 +1,21 @@
+# Initial sources def ########################
+# Trivialname
+#     address ( on huggingface)
+#     features
+#     subset (if not all or train)
+#     needs_chat_templating
+#     license
+#     citation
+#     bundled subdomains
+##############################################
+
+########################################### Basic pretrain sources ####################################################
+
+the-stack-v2:
+  address: bigcode/the-stack-v2-train-smol-ids # most strongly filtered version
+  requires_software_heritage_aws_download: True
+  features: [repo_name, content]
+  needs_chat_templating: False
+  license: other
+  citation: https://arxiv.org/abs/2402.19173
+  machine-generated: False

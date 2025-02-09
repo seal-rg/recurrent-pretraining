@@ -1,0 +1,1856 @@
+# # Initial sources def ########################
+# # Trivialname
+# #     address ( on huggingface)
+# #     features
+# #     subset (if not all or train)
+# #     needs_chat_templating
+# #     license
+# #     citation
+# #     bundled subdomains
+# ##############################################
+
+########################################### Basic pretrain sources ####################################################
+
+smollm-fineweb-edu:
+  address: HuggingFaceTB/smollm-corpus
+  subset: fineweb-edu-dedup
+  features: [text]
+  needs_chat_templating: False
+  license: odc-by
+  citation: https://huggingface.co/datasets/HuggingFaceTB/smollm-corpus
+  machine-generated: False
+  weight: 1.0 # this should be ~220b tokens
+  category: generic-text
+
+smollm-starcoder-python:
+  address: jon-tow/starcoderdata-python-edu
+  features: [max_stars_repo_path, content]
+  needs_chat_templating: False
+  license: other
+  citation: https://huggingface.co/datasets/HuggingFaceTB/smollm-corpus
+  machine-generated: False
+  weight: 1.0 # 4B tokens
+  category: code
+
+BookSum:
+  address: ubaada/booksum-complete-cleaned
+  subset: books
+  features: [text]
+  needs_chat_templating: False
+  license:
+  citation: https://arxiv.org/abs/2105.08209
+  machine-generated: False
+  weight: 2.0
+  category: longform-text
+  every_token_is_sacred: True
+
+GoodWiki: # deliberate duplication with wiki splits
+  address: euirim/goodwiki
+  features: [markdown]
+  needs_chat_templating: False
+  license: mit
+  citation: https://www.github.com/euirim/goodwiki
+  machine-generated: False
+  weight: 4.0
+  category: longform-text
+
+redpajama-arxiv: # via redpajama
+  address: togethercomputer/RedPajama-Data-1T
+  subset: arxiv
+  features: [text]
+  needs_chat_templating: False
+  license: https://info.arxiv.org/help/api/tou.html
+  citation: https://www.together.ai/blog/redpajama
+  machine-generated: False
+  weight: 2.0
+  category: scientific-text
+  every_token_is_sacred: True
+  # 28B tokens * 2
+
+redpajama-github: # via redpajama
+  address: togethercomputer/RedPajama-Data-1T
+  subset: github
+  features: [text]
+  needs_chat_templating: False
+  license: https://info.arxiv.org/help/api/tou.html
+  citation: https://www.together.ai/blog/redpajama
+  machine-generated: False
+  weight: 1.0
+  category: code
+  # ~60B tokens
+
+redpajama-stackexchange: # via redpajama
+  address: togethercomputer/RedPajama-Data-1T
+  subset: stackexchange
+  features: [text]
+  needs_chat_templating: False
+  license: https://info.arxiv.org/help/api/tou.html
+  citation: https://www.together.ai/blog/redpajama
+  machine-generated: False
+  weight: 1.0
+  category: Q&A-text
+  # 20B tokens
+
+# fineweb-fortified:
+#   address: airtrain-ai/fineweb-edu-fortified
+#   subset: CC-MAIN-2024-10 # need to enumerate all subsets manually?
+#   features: [text]
+#   needs_chat_templating: False
+#   license: odc-by
+#   citation:
+#   machine-generated: False
+
+# fineweb-edu:
+#   address: HuggingFaceFW/fineweb-edu
+#   features: [text]
+#   needs_chat_templating: False
+#   license: odc-by
+#   citation: https://huggingface.co/datasets/HuggingFaceFW/fineweb-edu
+#   machine-generated: False
+#   weight: 0
+#   category: generic-text
+#   # 1.3T tokens
+
+dolma-CC-news:
+  address: allenai/dolma
+  subset: cc_news_head
+  features: [text]
+  needs_chat_templating: False
+  license: other
+  citation: https://arxiv.org/abs/2402.00159
+  machine-generated: False
+  weight: 1.0
+  category: generic-text
+  # 14.3B
+
+dolma-pes2o:
+  address: allenai/dolma
+  subset: pes2o
+  features: [text]
+  needs_chat_templating: False
+  license: other
+  citation: https://arxiv.org/abs/2402.00159
+  machine-generated: False
+  weight: 2.0
+  category: scientific-text
+  # 60B
+
+dolma-reddit:
+  address: allenai/dolma
+  subset: reddit
+  features: [text]
+  needs_chat_templating: False
+  license: other
+  citation: https://arxiv.org/abs/2402.00159
+  machine-generated: False
+  weight: 1.0
+  category: generic-text
+  # around 80B tokens
+
+dolma-megawika:
+  address: allenai/dolma
+  subset: wikiref_megawika
+  features: [text]
+  needs_chat_templating: False
+  license: other
+  citation: https://arxiv.org/abs/2402.00159
+  machine-generated: False
+  weight: 1.0
+  category: longform-text
+  # 4.6B
+
+dolma-books:
+  address: allenai/dolma
+  subset: books
+  features: [text]
+  needs_chat_templating: False
+  license: other
+  citation: https://arxiv.org/abs/2402.00159
+  machine-generated: False
+  bundled-subdomains:
+    - project gutenberg
+  weight: 2.0
+  category: longform-text
+  # 5.3B
+
+dolma-wiki:
+  address: allenai/dolma
+  subset: wikipedia # a nicer wikipedia dump and wikibooks
+  features: [text]
+  needs_chat_templating: False
+  license: other
+  citation: https://arxiv.org/abs/2402.00159
+  machine-generated: False
+  weight: 4.0
+  category: longform-text
+  # 3.7B tokens # -this is pretty small compared to the redpajama wikipedia dump
+
+the-stack-v2:
+  address: bigcode/the-stack-v2-train-smol-ids # most strongly filtered version
+  requires_software_heritage_aws_download: True
+  features: [repo_name, content]
+  needs_chat_templating: False
+  license: other
+  citation: https://arxiv.org/abs/2402.19173
+  machine-generated: False
+  weight: 1.0 # need to adapt as we pull more stack data
+  category: code
+
+# what follows is an annoying enumeration of starcoder subsets, probably should have allowed
+# for subset to be a list when making this format, now this is unreadable, due to backward compat with the other files
+# starcoder-python:
+#   address: bigcode/starcoderdata
+#   subset: python
+#   features: [content]
+#   needs_chat_templating: False
+#   license: other
+#   citation: https://arxiv.org/abs/2305.06161
+#   machine-generated: False
+#   weight: 0 # already included up there
+#   category: code
+
+# starcoder-c:
+#   address: bigcode/starcoderdata
+#   subset: c
+#   features: [content]
+#   needs_chat_templating: False
+#   license: other
+#   citation: https://arxiv.org/abs/2305.06161
+#   machine-generated: False
+#   weight: 2.0
+#   category: code
+
+# starcoder-cpp:
+#   address: bigcode/starcoderdata
+#   subset: cpp
+#   features: [content]
+#   needs_chat_templating: False
+#   license: other
+#   citation: https://arxiv.org/abs/2305.06161
+#   machine-generated: False
+#   weight: 2.0
+#   category: code
+
+# starcoder-csharp:
+#   address: bigcode/starcoderdata
+#   subset: c-sharp
+#   features: [content]
+#   needs_chat_templating: False
+#   license: other
+#   citation: https://arxiv.org/abs/2305.06161
+#   machine-generated: False
+#   weight: 1.0
+#   category: code
+
+# starcoder-java:
+#   address: bigcode/starcoderdata
+#   subset: java
+#   features: [content]
+#   needs_chat_templating: False
+#   license: other
+#   citation: https://arxiv.org/abs/2305.06161
+#   machine-generated: False
+#   category: code
+
+starcoder-lean:
+  address: bigcode/starcoderdata
+  subset: lean
+  features: [content]
+  needs_chat_templating: False
+  license: other
+  citation: https://arxiv.org/abs/2305.06161
+  machine-generated: False
+  weight: 4.0
+  category: code
+
+starcoder-isabelle:
+  address: bigcode/starcoderdata
+  subset: isabelle
+  features: [content]
+  needs_chat_templating: False
+  license: other
+  citation: https://arxiv.org/abs/2305.06161
+  machine-generated: False
+  weight: 4.0
+  category: code
+
+starcoder-fortran:
+  address: bigcode/starcoderdata
+  subset: fortran
+  features: [content]
+  needs_chat_templating: False
+  license: other
+  citation: https://arxiv.org/abs/2305.06161
+  machine-generated: False
+  weight: 2.0
+  category: code
+
+starcoder-mathematica:
+  address: bigcode/starcoderdata
+  subset: mathematica
+  features: [content]
+  needs_chat_templating: False
+  license: other
+  citation: https://arxiv.org/abs/2305.06161
+  machine-generated: False
+  weight: 2.0
+  category: code
+
+# starcoder-notebook:
+#   address: bigcode/starcoderdata
+#   subset: jupyter-scripts-dedup-filtered
+#   features: [content]
+#   needs_chat_templating: False
+#   license: other
+#   citation: https://arxiv.org/abs/2305.06161
+#   machine-generated: False
+#   weight: 2.0
+#   category: code
+
+# starcoder-julia:
+#   address: bigcode/starcoderdata
+#   subset: julia
+#   features: [content]
+#   needs_chat_templating: False
+#   license: other
+#   citation: https://arxiv.org/abs/2305.06161
+#   machine-generated: False
+#   weight: 2.0
+#   category: code
+
+# starcoder-markdown:
+#   address: bigcode/starcoderdata
+#   subset: markdown
+#   features: [content]
+#   needs_chat_templating: False
+#   license: other
+#   citation: https://arxiv.org/abs/2305.06161
+#   machine-generated: False
+#   weight: 1.0
+#   category: code
+
+# starcoder-go:
+#   address: bigcode/starcoderdata
+#   subset: go
+#   features: [content]
+#   needs_chat_templating: False
+#   license: other
+#   citation: https://arxiv.org/abs/2305.06161
+#   machine-generated: False
+#   weight: 1.0
+#   category: code
+
+# starcoder-commits:
+#   address: bigcode/starcoderdata
+#   subset: git-commits-cleaned
+#   features: [content]
+#   needs_chat_templating: False
+#   license: other
+#   citation: https://arxiv.org/abs/2305.06161
+#   machine-generated: False
+#   weight: 1.0
+#   category: code
+
+# starcoder-issues:
+#   address: bigcode/starcoderdata
+#   subset: github-issues-filtered-structured
+#   features: [content]
+#   needs_chat_templating: False
+#   license: other
+#   citation: https://arxiv.org/abs/2305.06161
+#   machine-generated: False
+#   weight: 1.0
+#   category: code
+
+matrix-books:
+  address: m-a-p/Matrix
+  subset: book
+  features: ["text"]
+  needs_chat_templating: False
+  license: apache-2.0
+  citation: https://arxiv.org/abs/2405.19327
+  machine-generated: False
+  bundled-subdomains:
+    # a large amount of stuff bundled here, unclear which of it is "books"
+    - Agent-FLAN
+    - ChatDoctor-HealthCareMagic-100k
+    - Fandom23K
+    - LoC-PD-Books
+    - MNBVC
+    - Refined-Anime-Text
+    - SKGInstruct-skg-only
+    - US-PD-Books
+    - UltraTextbooks
+    - big patent
+    - clean notebooks filtered
+    - libre chem textbooks
+    - mental health chatbot dataset
+    - mini-peS2o
+    - textbooks
+    - pile-of-law
+    - prepared-automathtext
+    - scimag
+    - textbook quality programming
+    - textbooks
+    - tiny-strange-textbooks
+    - COIG-PC
+    - FinCorpus
+    - archive
+    - medical
+    - AutoMathText
+    - BioInstructQA
+    - SMolInstruct
+    - cosmopedia
+    - starcoder
+    - the-stack-v2-train-full-ids
+    - flan v2
+    - open-web-math
+  weight: 0.25
+  category: longform-text
+
+matrix-exams: # disabled during source download to remove duplication
+  address: m-a-p/Matrix
+  subset: exam
+  features: ["text"]
+  needs_chat_templating: False
+  license: apache-2.0
+  citation: https://arxiv.org/abs/2405.19327
+  machine-generated: False
+  bundled-subdomains:
+    # a large amount of stuff bundled here, unclear which of it is "exams"
+    - Agent-FLAN
+    - ChatDoctor-HealthCareMagic-100k
+    - Fandom23K
+    - LoC-PD-Books
+    - MNBVC
+    - Refined-Anime-Text
+    - SKGInstruct-skg-only
+    - US-PD-Books
+    - UltraTextbooks
+    - big patent
+    - clean notebooks filtered
+    - libre chem textbooks
+    - mental health chatbot dataset
+    - mini-peS2o
+    - textbooks
+    - pile-of-law
+    - prepared-automathtext
+    - scimag
+    - textbook quality programming
+    - textbooks
+    - tiny-strange-textbooks
+    - COIG-PC
+    - FinCorpus
+    - archive
+    - medical
+    - AutoMathText
+    - BioInstructQA
+    - SMolInstruct
+    - cosmopedia
+    - starcoder
+    - the-stack-v2-train-full-ids
+    - flan v2
+    - open-web-math
+  weight: 1.0
+  category: Q&A-text
+
+SlimPajama-Mix:
+  address: cerebras/SlimPajama-627B
+  features: [text]
+  needs_chat_templating: False
+  license: other
+  citation: https://cerebras.ai/blog/slimpajama-a-627b-token-cleaned-and-deduplicated-version-of-redpajama
+  machine-generated: False
+  weight: 0.25 # 627B tokens in full -> 156B # real count: 121B
+  category: generic-text
+############################################ Synthetic pretrain sources ################################################
+
+smollm-cosmo:
+  address: HuggingFaceTB/smollm-corpus
+  subset: cosmopedia-v2
+  features: [text]
+  needs_chat_templating: False
+  license: odc-by
+  citation: https://huggingface.co/datasets/HuggingFaceTB/smollm-corpus
+  machine-generated: True
+  model: Mixtral-8x7B-Instruct-v0.1
+  weight: 2.0 # 2 * 28B tokens
+  category: synthetic-text
+
+# note oss textbook comments on
+# open-phi/programming_books_llama
+# open-phi/textbooks
+# nampdn-ai/tiny-strange-textbooks
+# https://huggingface.co/datasets/Locutusque/UltraTextbooks/discussions/5#65c56da29bbc92dc61138b7e
+
+openphi-textbooks:
+  address: open-phi/textbooks
+  features: [markdown]
+  needs_chat_templating: False
+  license:
+  citation: https://arxiv.org/abs/2306.11644
+  machine-generated: True
+  model: GPT-3.5, GPT-4
+  weight: 1.0
+  category: synthetic-text
+
+openphi-textbooks-grounded:
+  address: open-phi/textbooks_grounded
+  features: [markdown]
+  needs_chat_templating: False
+  license:
+  citation: https://arxiv.org/abs/2306.11644
+  machine-generated: True
+  model: GPT-3.5, GPT-4
+  weight: 1.0
+  category: synthetic-text
+
+openphi-llamabooks:
+  address: open-phi/programming_books_llama
+  features: [markdown]
+  needs_chat_templating: False
+  license:
+  citation: https://arxiv.org/abs/2306.11644
+  machine-generated: True
+  model: GPT-3.5, codellama 34b
+  weight: 1.0
+  category: synthetic-text
+
+tiny-strange-textbooks:
+  address: nampdn-ai/tiny-strange-textbooks
+  features: [text]
+  needs_chat_templating: False
+  license: apache-2.0
+  citation: doi.org/10.57967/hf/1612
+  machine-generated: True
+  model: Nous-Hermes-Llama2-13b
+  weight: 1.0
+  category: synthetic-text
+
+tiny-textbooks:
+  address: nampdn-ai/tiny-textbooks
+  features: [text]
+  needs_chat_templating: False
+  license: apache-2.0
+  citation: doi.org/10.57967/hf/1126
+  machine-generated: True
+  model: Nous-Hermes-Llama2-13b
+  weight: 1.0
+  category: synthetic-text
+
+tiny-code-textbooks:
+  address: nampdn-ai/tiny-code-textbooks
+  features: [response]
+  needs_chat_templating: False
+  license: cc-by-nc-sa-4.0
+  citation:
+  machine-generated: True
+  model: Nous-Hermes-Llama2-13b
+  weight: 1.0
+  category: synthetic-text
+
+tiny-orca-textbooks:
+  address: nampdn-ai/tiny-orca-textbooks
+  features: [textbook]
+  needs_chat_templating: False
+  license: cc-by-nc-sa-4.0
+  citation:
+  machine-generated: True
+  model: Nous-Hermes-Llama2-13b
+  weight: 1.0
+  category: synthetic-text
+
+sciphi-textbooks:
+  address: SciPhi/textbooks-are-all-you-need-lite
+  features: [completion]
+  needs_chat_templating: False
+  license: llama2
+  citation:
+  machine-generated: True
+  model: CodeLlama-34B-v2
+  weight: 1.0
+  category: synthetic-text
+
+textbook-programming:
+  address: vikp/textbook_quality_programming
+  features: [markdown]
+  needs_chat_templating: False
+  license:
+  citation:
+  machine-generated: True
+  model: GPT-3.5
+  weight: 1.0
+  category: synthetic-text
+  every_token_is_sacred: True
+
+####################################### Specialized pretrain sources ##################################################
+
+proofpile-algebra:
+  address: EleutherAI/proof-pile-2
+  subset: algebraic-stack
+  features: [text]
+  needs_chat_templating: False
+  license:
+  citation: https://arxiv.org/abs/2310.10631
+  machine-generated: False
+  weight: 1.0 # another duplication bundled below with AutoMathText
+  category: math
+  every_token_is_sacred: True
+
+openweb-math:
+  address: open-web-math/open-web-math
+  features: [text]
+  needs_chat_templating: False
+  license:
+  citation: https://arxiv.org/abs/2310.06786
+  machine-generated: False
+  bundled-subdomains:
+    - stackexchange.com
+    - nature.com
+    - wordpress.com
+    - physicsforums.com
+    - github.io
+    - zbmath.org
+    - wikipedia.org
+    - groundai.com
+    - blogspot.com
+    - mathoverflow.net
+  weight: 1.0 # another duplication bundled below with AutoMathText
+  category: math
+  every_token_is_sacred: True
+
+# https://huggingface.co/datasets/biglam/hmd_newspapers
+
+british-library-books:
+  address: biglam/blbooks-parquet
+  features: [text]
+  needs_chat_templating: False
+  license: cc0-1.0
+  citation: https://doi.org/10.23636/r7w6-zy15
+  machine-generated: False
+  weight: 1.0
+  category: longform-text
+
+Library-of-Congress-books:
+  address: storytracer/LoC-PD-Books
+  features: [text]
+  needs_chat_templating: False
+  license: cc0-1.0
+  citation: https://www.loc.gov/collections/selected-digitized-books
+  machine-generated: False
+  weight: 1.0
+  category: longform-text
+
+# https://huggingface.co/datasets/storytracer/public_library_1929_dolma
+
+# https://huggingface.co/datasets/sedthh/gutenberg_english
+
+# https://huggingface.co/datasets/biglam/europeana_newspapers
+
+MathPile:
+  address: GAIR/MathPile
+  features: [text]
+  needs_chat_templating: False
+  license: cc-by-nc-sa-4.0
+  citation: https://arxiv.org/abs/2312.17120
+  machine-generated: False
+  bundled-subdomains:
+    - arXiv
+    - Wikipedia
+    - ProofWiki
+    - CommomCrawl
+    - StackExchange
+    - Textbooks
+  weight: 2.0
+  category: math
+  every_token_is_sacred: True
+
+CLRS:
+  address: tomg-group-umd/CLRS-Text-train
+  features: [question, answer]
+  needs_chat_templating: False
+  license: Apache-2.0
+  citation: https://arxiv.org/abs/2406.04229
+  machine-generated: True
+  model: template
+  weight: 1.0
+  category: math
+
+AutoMathText-1:
+  address: math-ai/AutoMathText
+  subset: "web-0.50-to-1.00"
+  features: [text] # abstract not guaranteed?
+  needs_chat_templating: False
+  license: CC BY-SA 4.0
+  citation: https://arxiv.org/abs/2402.07625
+  machine-generated: False
+  bundled-subdomains:
+    - OpenWebMath
+  weight: 1.0
+  category: math
+  every_token_is_sacred: True
+
+AutoMathText-2:
+  address: math-ai/AutoMathText
+  subset: "arxiv-0.50-to-1.00"
+  features: [text] # abstract not guaranteed?
+  needs_chat_templating: False
+  license: CC BY-SA 4.0
+  citation: https://arxiv.org/abs/2402.07625
+  machine-generated: False
+  bundled-subdomains:
+    - Redpajama
+  weight: 1.0
+  category: math
+  every_token_is_sacred: True
+
+AutoMathText-3:
+  address: math-ai/AutoMathText
+  subset: "code-0.50-to-1.00"
+  features: [text] # abstract not guaranteed?
+  needs_chat_templating: False
+  license: CC BY-SA 4.0
+  citation: https://arxiv.org/abs/2402.07625
+  machine-generated: False
+  bundled-subdomains:
+    - AlgebraicStack
+  weight: 1.0
+  category: math
+  every_token_is_sacred: True
+# already provided via proof-pile-2?
+
+bigcode-commitpack:
+  address: bigcode/commitpackft
+  # subset: [python,yaml,ruby,markdown,javascript,json,shell,text,php,java,html,xml,c]
+  features: [new_file, old_contents, message, new_contents]
+  needs_chat_templating: False
+  license: mit
+  citation: https://arxiv.org/abs/2308.07124
+  machine-generated: False
+  weight: 1.0
+  category: code
+
+bigcode-stack-python-fns:
+  address: bigcode/stack-dedup-python-fns
+  features: [content]
+  needs_chat_templating: False
+  license: other
+  citation: https://arxiv.org/abs/2308.07124
+  machine-generated: False
+  weight: 1.0
+  category: code
+
+VikpPython:
+  address: vikp/python_code_instructions_filtered
+  features: [output]
+  needs_chat_templating: False
+  license:
+  citation:
+  machine-generated: True
+  model:
+  bundled-subdomains:
+    - xlcost
+    - evol instruct
+    - code alpaca
+    - code instructions
+    - code search net
+  weight: 1.0
+  category: code
+
+chessllm:
+  address: mlabonne/chessllm
+  features: [transcript]
+  needs_chat_templating: False
+  license:
+  citation:
+  machine-generated: False
+  weight: 1.0
+  category: misc-reasoning
+
+# WaterHorseChess-clip: # needs more processing
+#   address: Waterhorse/chess_data
+#   subset: chessclip_data
+#   features: [text]
+#   needs_chat_templating: False
+#   license: apache-2.0
+#   citation: https://arxiv.org/abs/2306.09200
+#   machine-generated: False
+#   bundled-subdomains:
+#     - ChessCLIP
+
+WaterHorseChess-pre:
+  address: Waterhorse/chess_data
+  subset: chessgpt_data
+  features: [text]
+  needs_chat_templating: False
+  license: apache-2.0
+  citation: https://arxiv.org/abs/2306.09200
+  machine-generated: False
+  bundled-subdomains:
+    - ccrl
+    - pro_player
+    - lichess_db_37
+    - chess_puzzles
+    - chess_modeling
+  weight: 1.0
+  category: misc-reasoning
+
+# https://huggingface.co/datasets/nampdn-ai/tiny-lessons
+
+# huggingface.co/datasets/Hack90/libre_chem_textbooks
+
+# https://huggingface.co/datasets/vikp/python_functions_filtered
+
+eleutherai-lichess:
+  address: EleutherAI/lichess-puzzles
+  features: [ctx, target]
+  needs_chat_templating: False
+  license: Creative Commons CC0 1.0 Universal
+  citation: https://arxiv.org/abs/2108.06011
+  machine-generated: False
+  weight: 1.0
+  category: misc-reasoning
+
+############################################ Instruction Data  #########################################################
+
+genQA:
+  address: tomg-group-umd/GenQA
+  features: [text]
+  needs_chat_templating: True
+  license: CC BY-NC 4.0
+  citation: https://arxiv.org/abs/2406.10323
+  machine-generated: True
+  model: Gemini
+  weight: 1.0
+  category: generic-instruct
+
+oak:
+  address: tabularisai/oak
+  features: [Prompt, Response]
+  needs_chat_templating: True
+  license: apache-2.0
+  citation: https://arxiv.org/abs/2407.14371
+  machine-generated: True
+  model: [GPT4o, LLaMa3-70B, LLaMa3-8B, Mixtral-8x7B, Gemma-7B, Gemma-2-9B]
+  weight: 1.0
+  category: generic-instruct
+
+StackMathQA:
+  address: math-ai/StackMathQA
+  subset: stackmathqafull-1q1a
+  features: [Q, A]
+  needs_chat_templating: True
+  license: cc-by-4.0
+  citation: https://huggingface.co/datasets/math-ai/StackMathQA
+  machine-generated: False
+  weight: 2.0
+  category: math-instruct
+
+NuminaMath:
+  address: AI-MO/NuminaMath-CoT
+  features: [messages]
+  needs_chat_templating: True
+  license: cc-by-nc-4.0
+  citation: https://github.com/project-numina/aimo-progress-prize/
+  content: "Math exercises (online exam paper PDFs and mathematics discussion forums)"
+  machine-generated: False
+  weight: 2.0
+  category: math-instruct
+
+orca-math:
+  address: microsoft/orca-math-word-problems-200k
+  features: [question, answer]
+  needs_chat_templating: True
+  license: mit
+  citation: https://arxiv.org/abs/2402.14830
+  machine-generated: True
+  model: Azure GPT-4 Turbo
+  weight: 2.0
+  category: math-instruct
+
+TemplateGSM:
+  address: math-ai/TemplateGSM
+  features: [problem, solution_wocode]
+  needs_chat_templating: True
+  license: cc-by-4.0
+  citation: https://github.com/iiis-ai/TemplateMath
+  # content: Data augmentation of GSM-8k via templating
+  machine-generated: True
+  model: template
+  weight: 1.0
+  category: math-instruct
+
+tome:
+  address: arcee-ai/The-Tome
+  features: [conversations]
+  needs_chat_templating: True
+  license: mit
+  citation:
+  # content: Instruction Data Mix
+  machine-generated:
+  model:
+  bundled-subdomains:
+    - arcee-ai/infini-instruct-top-500k (BAAI/Infinity-Instruct)
+    - TIGER-Lab/WebInstructSub (top-500k)
+    - jondurbin/airoboros-3.2
+    - gardner/glaive-function-calling-v2-sharegpt
+    - arcee-ai/reasoning-sharegpt (SkunkworksAI/reasoning-0.01)
+    - arcee-ai/self-instruct-sharegpt (bigcode/self-oss-instruct-sc2-exec-filter-50k)
+    - cognitivecomputations/ultrainteract_trajectories_sharegpt
+    - cognitivecomputations/SystemChat-2.0
+    - arcee-ai/qwen2-72b-magpie-en
+  weight: 1.0
+  category: generic-instruct
+
+# numini20k:
+#   address: mlabonne/Numini-20k
+#   features: [instruction, output]
+#   needs_chat_templating: True
+#   license:
+#   citation:
+#   content: Math questions
+#   machine-generated:
+#   model:
+
+magpie-ultra:
+  address: argilla/magpie-ultra-v0.1
+  features: [messages] # [instruction, response]
+  needs_chat_templating: True
+  license: llama3.1
+  citation: https://arxiv.org/abs/2406.08464
+  # content: Misc. instruction data
+  machine-generated: True
+  model: Llama-3.1-405B-instruct
+  weight: 1.0
+  category: generic-instruct
+
+MATH-plus:
+  address: TIGER-Lab/MATH-plus
+  features: [instruction, output]
+  needs_chat_templating: True
+  license: mit
+  citation: https://arxiv.org/abs/2405.03548
+  machine-generated: True
+  model: GPT-4
+  bundled-subdomains:
+    - MetaMath
+    - MATH-orca
+    - MATH-augmented (??)
+  weight: 2.0
+  category: math-instruct
+
+WebInstruct:
+  address: TIGER-Lab/WebInstructSub
+  features: [question, answer]
+  needs_chat_templating: True
+  license:
+  citation: https://arxiv.org/pdf/2405.03548
+  machine-generated: True
+  model: GPT-4
+  bundled-subdomains:
+    - mathstackexchange
+    - stackexchange
+    - socratic
+  weight: 1.0
+  category: generic-instruct
+
+MathInstruct:
+  address: TIGER-Lab/MathInstruct
+  features: [instruction, output]
+  needs_chat_templating: True
+  license:
+  citation: https://arxiv.org/abs/2309.05653
+  machine-generated: True
+  model: GPT-4
+  bundled-subdomains:
+    - GSM8K (MIT)
+    - GSM8K-RFT (Non listed)
+    - AQuA-RAT (Apache 2.0)
+    - MATH (MIT)
+    - TheoremQA (MIT)
+    - Camel-Math (Attribution-NonCommercial 4.0 International)
+    - NumGLUE (Apache-2.0)
+    - MathQA (Apache-2.0)
+    - Our Curated (MIT)
+  weight: 2.0
+  category: math-instruct
+
+# ChatQA-sft:
+#   address: nvidia/ChatQA-Training-Data
+#   subset: sft
+#   features: [messages, answers]
+#   needs_chat_templating: True
+#   license: other
+#   citation:
+#   machine-generated: True
+#   model: GPT-3.5-turbo-0613
+
+# ChatQA:
+#   address: nvidia/ChatQA-Training-Data
+#   features: [messages]
+#   needs_chat_templating: True
+#   license: other
+#   citation:
+#   machine-generated: True
+#   model: GPT-3.5-turbo-0613
+#   bundled-subdomains:
+#     - DROP
+#     - NarrativeQA
+#     - NewsQA
+#     - Quoref
+#     - ROPES
+#     - SQuAD1.1
+#     - SQuAD2.0,
+#     - TAT-QA
+#     - Soda
+#     - ELI5
+#     - FLAN
+#     - the FLAN collection
+#     - Self-Instruct
+#     - Unnatural Instructions
+#     - OpenAssistant
+#     - Dolly
+
+open-hermes-2.5:
+  address: teknium/OpenHermes-2.5
+  features: [conversations]
+  needs_chat_templating: True
+  license: other
+  citation: https://huggingface.co/datasets/teknium/OpenHermes-2.5
+  machine-generated: True
+  bundled-subdomains:
+    - Airoboros 2.2
+    - CamelAI Domain Expert Datasets
+    - ChatBot Arena
+    - Collective Cognition
+    - CoT Alpaca GPT4
+    - Evol Instruct 70K && 140K
+    - Glaive Code Assistant
+    - GPT4-LLM
+    - GPTeacher
+    - Medical Tasks
+    - MetaMath 40k
+    - SlimOrca 550K
+    - Platypus
+    - ShareGPT
+    - Unnatural Instructions GPT4
+  weight: 1.0
+  category: generic-instruct
+
+skunkworks-reasoning:
+  address: SkunkworksAI/reasoning-0.01
+  features: [instruction, reasoning, output]
+  needs_chat_templating: True
+  license:
+  citation: https://huggingface.co/datasets/SkunkworksAI/reasoning-0.01
+  machine-generated: True
+  weight: 2.0
+  category: generic-instruct
+
+dart-math:
+  address: hkust-nlp/dart-math-hard
+  features: [query, response]
+  needs_chat_templating: True
+  license: mit
+  citation: https://arxiv.org/abs/2407.13690
+  machine-generated: True
+  model: DeepSeekMath-7B-RL
+  weight: 2.0
+  category: math-instruct
+
+gsm8k:
+  address: hkust-nlp/gsm8k-fix
+  features: [query, resp]
+  needs_chat_templating: True
+  license: mit
+  citation: https://arxiv.org/abs/2110.14168
+  machine-generated: False
+  weight: 1.0
+  category: math-instruct
+
+WebInstruct-prometheus:
+  address: chargoddard/WebInstructSub-prometheus
+  features: [instruction, generation]
+  needs_chat_templating: True
+  license: apache-2.0
+  citation: https://arxiv.org/abs/2405.01535
+  machine-generated: True
+  model: GPT-4
+  weight: 1.0
+  category: generic-instruct
+
+hercules:
+  address: Locutusque/hercules-v5.0
+  features: [conversations]
+  needs_chat_templating: True
+  license: other
+  citation: https://huggingface.co/datasets/Locutusque/hercules-v5.0
+  machine-generated: True
+  model:
+  bundled-subdomains:
+    - OpenOrca/SlimOrca
+    - Evol Instruct 70K & 140K
+    - teknium/GPT4-LLM-Cleaned
+    - jondurbin/airoboros-3.2
+    - AlekseyKorshuk/camel-chatml
+    - CollectiveCognition/chats-data-2023-09-22
+    - Lmsys chat 1m GPT-4 generations only.
+    - glaiveai/glaive-code-assistant
+    - Locutusque/function-calling-chatml
+    - garage-bAInd/Open-Platypus
+    - TIGER-Lab/MATH-plus
+    - GPTeacher roleplay datasets
+    - BI55/MedText
+    - Various medical datasets by CogStack
+    - Unnatural Instructions
+    - m-a-p/Code-Feedback
+    - totally-not-an-llm/EverythingLM-data-V3
+    - LDJnr/Capybara
+    - Vezora/Tested-22k-Python-Alpaca
+    - Crystalcareai/alpaca-gpt4-COT
+    - CollectiveCognition/chats-data-2023-09-27
+    - CollectiveCognition/chats-data-2023-10-16
+    - NobodyExistsOnTheInternet/sharegptPIPPA
+    - winglian/chatlogs-en-cleaned
+    - winglian/deduped-ds
+    - grimulkan/theory-of-mind
+    - Locutusque/caseus_custom
+  weight: 1.0
+  category: generic-instruct
+
+OpenMathInstruct:
+  address: nvidia/OpenMathInstruct-1
+  features: [question, expected_answer]
+  needs_chat_templating: True
+  license: nvidia-license(other)
+  citation: https://arxiv.org/abs/2402.10176
+  machine-generated: True
+  model: Mixtral-8x7B
+  weight: 1.0
+  category: math-instruct
+
+MetaMathQA:
+  address: meta-math/MetaMathQA
+  features: [query, response]
+  needs_chat_templating: True
+  license: mit
+  citation: https://arxiv.org/abs/2309.12284
+  machine-generated: True
+  model: GPT-3.5-Turbo
+  weight: 1.0
+  category: math-instruct
+
+CodeFeedback:
+  address: m-a-p/CodeFeedback-Filtered-Instruction
+  features: [query, answer]
+  needs_chat_templating: True
+  license: apache-2.0
+  citation: https://arxiv.org/abs/2402.14658
+  machine-generated: True
+  model: Qwen072B-Chat
+  bundled-subdomains:
+    - Magicoder-OSS-Instruct
+    - ShareGPT (Python code subset)
+    - Magicoder-Evol-Instruct
+    - Evol-Instruct-Code
+  weight: 2.0
+  category: generic-instruct
+
+  # PureDove:
+  # address: LDJnr/Pure-Dove
+  # features: [conversation]
+  # needs_chat_templating: True
+  # license: apache-2.0
+  # citation: https://huggingface.co/datasets/LDJnr/Capybara
+  # machine-generated: True
+  # model: GPT-4
+  # bundled-subdomains:
+  #   - ShareGPT
+  #     - ChatBotArena
+  # leaks into MTBench
+
+Daring-Anteater:
+  address: nvidia/Daring-Anteater
+  features: [conversations]
+  needs_chat_templating: True
+  license: cc-by-4.0
+  citation: https://arxiv.org/abs/2406.08673
+  machine-generated: True
+  model: Mixtral-8x7b-Instruct
+  bundled-subdomains:
+    - synthetic_conv
+    - synthetic_roleplay
+    - synthetic_math
+    - synthetic_precise_instruction_following
+    - synthetic_json_format_following
+    - synthetic_complex_instruction
+    - FinQA
+    - wikitablequestions
+    - Open-Platypus
+  weight: 1.0
+  category: generic-instruct
+
+Nvidia-Blender:
+  address: nvidia/sft_datablend_v1
+  features: [conversations]
+  needs_chat_templating: True
+  license: cc-by-4.0
+  citation: https://huggingface.co/datasets/nvidia/sft_datablend_v1
+  machine-generated: True
+  model:
+  bundled-subdomains:
+    - OASST
+    - CodeContests
+    - MNLI
+    - QNLI
+    - WNLI
+    - BooLQ
+    - DROP
+    - OpenbookQA
+    - SQuAD v1
+    - SQuAD v2
+    - COPA
+    - HellaSwag
+    - PIQA
+    - StoryCloze
+    - ARC
+    - NQ
+    - TriviaQA
+    - Paws Wiki
+    - Winogrande
+    - WSC273
+    - CosmosQA
+    - ReCoRD CNN/Daily Mail
+    - DART
+    - E2ENLG
+    - QuAC
+    - Mathematics
+    - SNLI
+    - Adversarial QA
+    - Amazon Polarity
+    - DBPedia
+    - DuoRC
+    - Hotpot QA
+    - QASC
+    - Quarel
+    - QuaRTz
+    - Quoref
+    - ROPES
+    - Social IQA
+    - Wiki Bio
+    - Wiki Hop
+    - ARB
+    - tigerbot-kaggle-leetcodesolutions-en-2k
+    - SciBench
+    - PRM800K
+    - GSM8K
+  weight: 1.0
+  category: generic-instruct
+
+baai-instruct-foundation:
+  address: BAAI/Infinity-Instruct
+  subset: 7M
+  features: [conversations]
+  needs_chat_templating: True
+  license:
+  citation: https://huggingface.co/datasets/BAAI/Infinity-Instruct
+  machine-generated: True
+  model:
+  bundled-subdomains:
+    - glaiveai/glaive-code-assistant-v3
+    - Replete-AI/code_bagel_hermes-2.5
+    - m-a-p/CodeFeedback-Filtered-Instruction
+    - bigcode/self-oss-instruct-sc2-exec-filter-50k
+    - codefuse-ai/CodeExercise-Python-27k
+    - nickrosh/Evol-Instruct-Code-80k-v1
+    - jinaai/code_exercises
+    - TokenBender/code_instructions_122k_alpaca_style
+    - iamtarun/python_code_instructions_18k_alpaca
+    - Nan-Do/instructional_code-search-net-python
+    - Safurai/Code-Instruct-700k
+    - ajibawa-2023/Python-Code-23k-ShareGPT
+    - jtatman/python-code-dataset-500k
+    - m-a-p/Code-Feedback
+    - TIGER-Lab/MathInstruct
+    - microsoft/orca-math-word-problems-200k
+    - MetaMathQa
+    - teknium/Openhermes-2.5
+    - google/flan
+    - "Selected subjective instructions"
+  weight: 1.0
+  category: generic-instruct
+
+baai-instruct-gen:
+  address: BAAI/Infinity-Instruct
+  subset: Gen
+  features: [conversations]
+  needs_chat_templating: True
+  license:
+  citation: https://huggingface.co/datasets/BAAI/Infinity-Instruct
+  machine-generated: True
+  model:
+  bundled-subdomains:
+    - glaiveai/glaive-code-assistant-v3
+    - Replete-AI/code_bagel_hermes-2.5
+    - m-a-p/CodeFeedback-Filtered-Instruction
+    - bigcode/self-oss-instruct-sc2-exec-filter-50k
+    - codefuse-ai/CodeExercise-Python-27k
+    - nickrosh/Evol-Instruct-Code-80k-v1
+    - jinaai/code_exercises
+    - TokenBender/code_instructions_122k_alpaca_style
+    - iamtarun/python_code_instructions_18k_alpaca
+    - Nan-Do/instructional_code-search-net-python
+    - Safurai/Code-Instruct-700k
+    - ajibawa-2023/Python-Code-23k-ShareGPT
+    - jtatman/python-code-dataset-500k
+    - m-a-p/Code-Feedback
+    - TIGER-Lab/MathInstruct
+    - microsoft/orca-math-word-problems-200k
+    - MetaMathQa
+    - teknium/Openhermes-2.5
+    - google/flan
+    - "Selected subjective instructions"
+  weight: 1.0
+  category: generic-instruct
+
+anthracite-stheno:
+  address: anthracite-org/Stheno-Data-Filtered
+  features: [conversations]
+  needs_chat_templating: True
+  license:
+  citation:
+  machine-generated: True
+  model: Claude-3-opus-20240229
+  weight: 1.0
+  category: math-instruct
+
+opus-writing:
+  address: Nopm/Opus_WritingStruct
+  features: [messages]
+  needs_chat_templating: True
+  license: apache-2.0
+  citation:
+  machine-generated: True
+  model: Claude-3-opus
+  weight: 2.0
+  category: writing-instruct
+
+math-step:
+  address: xinlai/Math-Step-DPO-10K
+  features: [prompt, full_chosen]
+  needs_chat_templating: True
+  license:
+  citation: https://arxiv.org/abs/2406.18629
+  machine-generated: True
+  model:
+  weight: 2.0
+  category: math-instruct
+
+bigcode-oss:
+  address: bigcode/self-oss-instruct-sc2-exec-filter-50k
+  features: [instruction, response]
+  needs_chat_templating: True
+  license:
+  citation: https://huggingface.co/blog/sc2-instruct
+  machine-generated: True
+  model: StarCoder2-15B
+  weight: 1.0
+  category: generic-instruct
+
+everyday-conversations:
+  address: HuggingFaceTB/everyday-conversations-llama3.1-2k
+  features: [messages]
+  needs_chat_templating: True
+  license: apache-2.0
+  citation:
+  machine-generated: True
+  model: Llama-3.1-70b-instruct
+  weight: 3.0
+  category: writing-instruct
+
+no-robots:
+  address: HuggingFaceH4/no_robots
+  features: [messages]
+  needs_chat_templating: True
+  license: cc-by-nc-4.0
+  citation: https://arxiv.org/abs/2203.02155
+  machine-generated: False
+  weight: 3.0
+  category: writing-instruct
+
+longwriter:
+  address: THUDM/LongWriter-6k
+  features: [messages]
+  needs_chat_templating: True
+  license: apache-2.0
+  citation: https://arxiv.org/abs/2408.07055
+  machine-generated: True
+  model: GPT-4o
+  weight: 2.0
+  category: writing-instruct
+
+webglm-qa:
+  address: THUDM/webglm-qa
+  features: [question, answer]
+  needs_chat_templating: True
+  license:
+  citation: https://arxiv.org/abs/2306.07906
+  weight: 1.0
+  category: generic-instruct
+
+# WaterHorseChess-chat:
+#   subset: chessgpt_sft_data
+#   address: Waterhorse/chess_data
+#   features: [conversations]
+#   needs_chat_templating: False
+#   license: apache-2.0
+#   citation: https://arxiv.org/abs/2306.09200
+#   machine-generated: False
+#   bundled-subdomains:
+#     - ChessGPT Chat
+
+ArxivInstruct:
+  address: AlgorithmicResearchGroup/ArXivDLInstruct
+  features: [prompt, description, function]
+  needs_chat_templating: True
+  license: mit
+  citation: https://huggingface.co/datasets/AlgorithmicResearchGroup/ArXivDLInstruct
+  machine-generated: True
+  model: unknown
+  weight: 1.0
+  category: math-instruct
+
+tulu-sft: # quality???
+  address: allenai/tulu-v2-sft-mixture-olmo-4096
+  features: ["messages"]
+  needs_chat_templating: True
+  license: odc-by
+  citation: https://arxiv.org/abs/2402.00838
+  machine-generated: True
+  model: many
+  bundled-subdomains:
+    - FLAN
+    - openAssistant
+    - ShareGPT
+    - GPT4-Alpaca
+    - Code-Alpaca
+    - LIMA
+    - WizardLM Evol Instruct
+    - Open-Orca
+    - Hardcoded # need to filter these out!
+    - Science
+  weight: 1.0
+  category: generic-instruct
+
+P3:
+  address: bigscience/P3
+  features: ["inputs_pretokenized", "targets_pretokenized"]
+  needs_chat_templating: True
+  license: apache-2.0
+  citation: https://arxiv.org/abs/2110.08207
+  machine-generated: False
+  bundled-subdomains: # ...
+    - CommonsenseQA
+    - DREAM
+    - QUAIL
+    - QuaRTz
+    - Social IQA
+    - WiQA
+    - Cosmos
+    - QASC
+    - Quarel
+    - SciQ
+    - Wiki Hop
+    - ARC
+    - OpenBookQA
+    - MultiRC
+    - PIQA
+    - RACE
+    - HellaSwag
+    - BoolQ
+    - Adversarial QA
+    - Quoref
+    - DuoRC
+    - ROPES
+    - SQuAD v2
+    - ReCoRD
+    - Hotpot QA
+    - Wiki QA
+    - Trivia QA
+    - Web Questions
+    - Common Gen
+    - Wiki Bio
+    - Amazon
+    - App Reviews
+    - IMDB
+    - Rotten Tomatoes
+    - Yelp
+    - CNN Daily Mail
+    - Gigaword
+    - MultiNews
+    - SamSum
+    - XSum
+    - AG News
+    - DBPedia
+    - TREC
+    - MRPC
+    - PAWS
+    - QQP
+    - ANLI
+    - CB
+    - RTE
+    - WSC
+    - Winogrande
+    - WiC
+    - COPA
+    - Story Cloze
+  weight: 1.0
+  category: generic-instruct
+
+OrcaSonnet:
+  address: Gryphe/Sonnet3.5-SlimOrcaDedupCleaned
+  features: [conversations]
+  needs_chat_templating: True
+  license: mit
+  citation: cgato/SlimOrcaDedupCleaned
+  machine-generated: True
+  model: Claude-3-Sonnet
+  weight: 2.0
+  category: writing-instruct
+
+opus-writingprompts:
+  address: Gryphe/Opus-WritingPrompts
+  features: [conversations]
+  needs_chat_templating: True
+  license: unknown
+  citation:
+  machine-generated: True
+  model: Claude-3-opus
+  weight: 2.0
+  category: writing-instruct
+
+reddit-writing:
+  address: nothingiisreal/Reddit-Dirty-And-WritingPrompts
+  features: [completion]
+  needs_chat_templating: True
+  license: apache-2.0
+  citation:
+  machine-generated: False
+  weight: 2.0
+  category: writing-instruct
+
+kalomaze-instruct:
+  address: nothingiisreal/Kalomaze-Opus-Instruct-25k-filtered
+  features: [conversations]
+  needs_chat_templating: True
+  license: apache-2.0
+  citation:
+  machine-generated: True
+  model: Claude-3-opus
+  weight: 2.0
+  category: writing-instruct
+
+lean-github:
+  address: internlm/Lean-Github
+  features: [state_before, tactic, state_after]
+  needs_chat_templating: False
+  license: apache-2.0
+  citation: https://www.arxiv.org/abs/2407.17227
+  machine-generated: False
+  weight: 3.0
+  category: math-instruct
+
+lean-workbook:
+  address: pkuAI4M/LeanWorkbook # internlm/Lean-Workbook
+  features: [formal_statement, natural_language_statement]
+  needs_chat_templating: False
+  license: apache-2.0
+  citation: https://arxiv.org/abs/2406.03847
+  machine-generated: False
+  weight: 3.0
+  category: math-instruct
+
+mma:
+  address: casey-martin/multilingual-mathematical-autoformalization # AI4M/mma-dataset
+  features: [input, output]
+  needs_chat_templating: True
+  license: apache-2.0
+  citation: https://arxiv.org/abs/2311.03755
+  machine-generated: False
+  weight: 3.0
+  category: math-instruct
+
+lean-dojo-informal:
+  address: AI4M/leandojo-informalized
+  features: [informalization]
+  needs_chat_templating: False
+  license:
+  citation: https://arxiv.org/abs/2306.15626
+  machine-generated: False
+  weight: 3.0
+  category: math-instruct
+
+cpp-annotations:
+  address: casey-martin/oa_cpp_annotate_gen
+  features: [INSTRUCTION, RESPONSE]
+  needs_chat_templating: True
+  license:
+  citation: https://twitter.com/moyix/status/1644355889602654210
+  machine-generated: True
+  model: GPT-3.5-turbo
+  weight: 1.0
+  category: generic-instruct
+
+lean-tactics:
+  address: l3lab/ntp-mathlib-instruct-st
+  features: [prompt, completion]
+  needs_chat_templating: True
+  license:
+  citation: https://arxiv.org/abs/2408.03350
+  machine-generated: False
+  weight: 2.0
+  category: math-instruct
+
+college-math:
+  address: ajibawa-2023/Maths-College
+  features: [output]
+  needs_chat_templating: False
+  license: apache-2.0
+  citation:
+  machine-generated: True
+  model: unknown
+  weight: 1.0
+  category: math
+
+gradeschool-math:
+  address: ajibawa-2023/Maths-Grade-School
+  features: [output]
+  needs_chat_templating: False
+  license: apache-2.0
+  citation:
+  machine-generated: True
+  model: unknown
+  weight: 1.0
+  category: math
+
+general-stories:
+  address: ajibawa-2023/General-Stories-Collection
+  features: [text]
+  needs_chat_templating: False
+  license: apache-2.0
+  citation:
+  machine-generated: True
+  model: unknown
+  weight: 1.0
+  category: synthetic-text
+
+amps-mathematica:
+  address: XinyaoHu/AMPS_mathematica
+  features: [question, answer]
+  needs_chat_templating: True
+  license: mit
+  citation:
+  machine-generated: False
+  weight: 1.0
+  category: math
+
+amps-khan:
+  address: XinyaoHu/AMPS_khan
+  features: [problem, "hints/solution"]
+  needs_chat_templating: True
+  license: mit
+  citation:
+  model-generated: False
+  weight: 1.0
+  category: math-instruct
+
+Magpie-300k:
+  address: Magpie-Align/Magpie-Pro-MT-300K-v0.1
+  features: [conversations]
+  needs_chat_templating: True
+  license: llama3
+  citation: https://arxiv.org/abs/2406.08464
+  machine-generated: True
+  model: Llama-3-70b-instruct
+  weight: 1.0
+  category: generic-instruct
+
+Magpie-reasoning:
+  address: Magpie-Align/Magpie-Reasoning-150K
+  features: [conversations]
+  needs_chat_templating: True
+  license: llama3
+  citation: https://arxiv.org/abs/2406.08464
+  machine-generated: True
+  model: Llama-3-70b-instruct, QWen2-72B-instruct
+  weight: 1.0
+  category: generic-instruct
+
+prox-fineweb:
+  address: gair-prox/FineWeb-pro
+  features: [text]
+  needs_chat_templating: False
+  license: odc-by
+  citation: https://arxiv.org/abs/2409.17115
+  machine-generated: False
+  weight: 1.0
+  category: generic-text
+
+prox-c4:
+  address: gair-prox/c4-pro
+  features: [text]
+  needs_chat_templating: False
+  license: odc-by
+  citation: https://arxiv.org/abs/2409.17115
+  machine-generated: False
+  weight: 1.0
+  category: generic-text
+
+prox-redpajama:
+  address: gair-prox/RedPajama-pro
+  features: [text]
+  needs_chat_templating: False
+  license: odc-by
+  citation: https://arxiv.org/abs/2409.17115
+  machine-generated: False
+  weight: 1.0
+  category: generic-text
+
+prox-open-web-math:
+  address: gair-prox/open-web-math-pro
+  features: [text]
+  needs_chat_templating: False
+  license: odc-by
+  citation: https://arxiv.org/abs/2409.17115
+  machine-generated: False
+  weight: 1.0
+  category: math
+
+################################# Long context data : #############################################
+together-long-data:
+  address: togethercomputer/Long-Data-Collections
+  subset: pretrain
+  features: [text]
+  needs_chat_templating: False
+  license: other
+  citation: https://www.together.ai/blog/llama-2-7b-32k-instruct
+  machine-generated: False
+  bundled-subdomains:
+    - RedPajama-Book
+    - RedPajama-ArXiv
+    - UL2 Oscar
+    - RedPajama
+    - NI
+    - P3
+    - ThePile
+  weight: 1.0
+  category: longform-text
+
+project-gutenberg-19:
+  address: emozilla/pg19
+  features: [text]
+  needs_chat_templating: False
+  license: apache-2.0
+  citation: https://arxiv.org/abs/1911.05507
+  machine-generated: False
+  weight: 1.0
+  category: longform-text
+
+####################################### New ###########################################
+
+mathgenie:
+  address: MathGenie/MathCode-Pile
+  features: [text]
+  needs_chat_templating: False
+  license: apache-2.0
+  citation: https://arxiv.org/abs/2410.08196
+  machine-generated: False
+  weight: 1.0
+  category: math
+
+reasoning-base:
+  address: KingNish/reasoning-base-20k
+  features: [text]
+  needs_chat_templating: True
+  license: apache-2.0
+  citation:
+  machine-generated: True
+  weight: 1.0
+  category: math
+
+OpenMathInstruct-2:
+  address: nvidia/OpenMathInstruct-2
+  features: [problem, generated_solution]
+  needs_chat_templating: True
+  license: nvidia-license(other)
+  citation: https://arxiv.org/abs/2410.01560
+  machine-generated: True
+  model: Mixtral-8x7B
+  weight: 1.0
+  category: math-instruct
+
+Txt360-FreeLaw: # how many tokens is this
+  address: LLM360/TxT360
+  subset: freelaw
+  features: [text]
+  needs_chat_templating: False
+  license: odc-by
+  citation: https://huggingface.co/spaces/LLM360/TxT360
+  machine-generated: False
+  weight: 1.0
+  category: scientific-text
+
+Txt360-DM:
+  address: LLM360/TxT360
+  subset: dm_maths
+  features: [text]
+  needs_chat_templating: False
+  license: odc-by
+  citation: https://huggingface.co/spaces/LLM360/TxT360
+  machine-generated: False
+  weight: 1.0
+  category: math
+
+Txt360-philpapers:
+  address: LLM360/TxT360
+  subset: phil_papers
+  features: [text]
+  needs_chat_templating: False
+  license: odc-by
+  citation: https://huggingface.co/spaces/LLM360/TxT360
+  machine-generated: False
+  weight: 1.0
+  category: scientific-text
+  every_token_is_sacred: True
+
+Txt360-pubmed:
+  address: LLM360/TxT360
+  subset: pubmed_central
+  features: [text]
+  needs_chat_templating: False
+  license: odc-by
+  citation: https://huggingface.co/spaces/LLM360/TxT360
+  machine-generated: False
+  weight: 1.0
+  category: scientific-text
+
+Txt360-ubuntu-chat:
+  address: LLM360/TxT360
+  subset: ubuntu_irc
+  features: [text]
+  needs_chat_templating: False
+  license: odc-by
+  citation: https://huggingface.co/spaces/LLM360/TxT360
+  machine-generated: False
+  weight: 1.0
+  category: Q&A-text
+
+markdown-arxiv:
+  address: neuralwork/arxiver
+  features: [title, abstract, markdown]
+  needs_chat_templating: False
+  license: cc-by-nc-sa-4.0
+  machine-generated: False
+  weight: 2.0
+  category: scientific-text
+  every_token_is_sacred: True
