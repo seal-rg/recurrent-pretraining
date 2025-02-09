@@ -36,4 +36,4 @@ This code is released under an [apache-2.0](https://choosealicense.com/licenses/
 ```
 
 ## Contact
-Please, feel free to contact us with any questions, or open an discussion thread on Hugging Face.
+Please, feel free to contact us with any questions, or open an issue!
