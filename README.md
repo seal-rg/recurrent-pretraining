@@ -25,13 +25,21 @@ This code is released under an [apache-2.0](https://choosealicense.com/licenses/
 
 ## Citation
 ```
-@article{geiping2025scaling,
-      title={Scaling up Test-Time Compute with Latent Reasoning: A Recurrent Depth Approach}, 
-      author={Jonas Geiping and Sean McLeish and Neel Jain and John Kirchenbauer and Siddharth Singh and Brian R. Bartoldson and Bhavya Kailkhura and Abhinav Bhatele and Tom Goldstein},
-      year={2025},
-      eprint={2502.},
-      archivePrefix={arXiv},
-      primaryClass={cs.CL}
+@article{geiping_scaling_2025,
+  title = {Scaling up {{Test-Time Compute}} with {{Latent Reasoning}}: {{A Recurrent Depth Approach}}},
+  shorttitle = {Scaling up {{Test-Time Compute}} with {{Latent Reasoning}}},
+  author = {Geiping, Jonas and McLeish, Sean and Jain, Neel and Kirchenbauer, John and Singh, Siddharth and Bartoldson, Brian R. and Kailkhura, Bhavya and Bhatele, Abhinav and Goldstein, Tom},
+  year = {2025},
+  month = feb,
+  eprint = {2502.05171},
+  primaryclass = {cs},
+  publisher = {arXiv},
+  doi = {10.48550/arXiv.2502.05171},
+  url = {http://arxiv.org/abs/2502.05171},
+  urldate = {2025-02-10},
+  archiveprefix = {arXiv},
+  keywords = {Computer Science - Computation and Language,Computer Science - Machine Learning},
+  journal = {arxiv:2502.05171[cs]}
 }
 ```
 
