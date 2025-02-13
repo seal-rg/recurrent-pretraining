@@ -8,7 +8,7 @@ build-backend = "setuptools.build_meta"
 requires-python = ">= 3.11"
 
 [project]
-name = "lit-gpt-umd"
+name = "recurrent-pretraining"
 version = "0.1"
 dependencies = [
   "numpy<2.0",
