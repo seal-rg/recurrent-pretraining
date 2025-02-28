@@ -757,7 +757,10 @@ class RavenForCausalLM(RavenPreTrainedModel, GenerationMixin):
         cache_kwargs: dict = {},
         **model_kwargs,
     ) -> Union[torch.Tensor, GenerateDecoderOnlyOutput]:
-        """Minimal single-sequence generation. Template for more complicated generate tasks"""
+        """
+        Generate tokens with adaptive compute. This is NOT the most efficient implementation.
+        For batches, on each token, we iterate until the entire batch finishes.
+        """
         # Setup
         if generation_config is None:
             generation_config: GenerationConfig = self.generation_config  # type: ignore
@@ -765,10 +768,16 @@ class RavenForCausalLM(RavenPreTrainedModel, GenerationMixin):
         model_kwargs["use_cache"] = True
         model_kwargs = self._get_initial_cache_position(input_ids, model_kwargs)
         stop_tokens = self._get_stops(generation_config, tokenizer).to(input_ids.device)
+        batch_size = input_ids.shape[0]
+        compute_steps = []
+        
+        # Set up continuous compute if enabled
         if continuous_compute:
             embedded_inputs, _, _ = self.embed_inputs(input_ids)
-            current_last_latent = self.initialize_state(embedded_inputs)
-        compute_steps = []
+            current_last_latents = self.initialize_state(embedded_inputs)
+        
+        # Track which sequences have finished
+        finished_sequences = torch.zeros(batch_size, dtype=torch.bool, device=input_ids.device)
 
         # Generate tokens
         for step in range(generation_config.max_length - input_ids.shape[1]):
@@ -781,130 +790,168 @@ class RavenForCausalLM(RavenPreTrainedModel, GenerationMixin):
             if not continuous_compute:
                 current_latents = self.initialize_state(embedded_inputs, deterministic=False)
             else:
-                current_latents = current_last_latent
+                current_latents = current_last_latents
 
-            # Prep criterions:
+            # Initialize criterion tracking for each sequence in batch
+            exit_values_per_seq = [[] for _ in range(batch_size)]
+            compute_steps_per_seq = [0] * batch_size
+            exit_reached = torch.zeros(batch_size, dtype=torch.bool, device=input_ids.device)
+
+            # Set up criterions based on selected strategy
             if criterion == "entropy-diff":
-                entropy = torch.tensor(100.0, device=input_ids.device)
+                entropy = torch.ones(batch_size, device=input_ids.device) * 100.0
                 exit_threshold = 1e-3 if exit_threshold == "auto" else float(exit_threshold)
             elif criterion in ["latent-diff", "none"]:
                 exit_threshold = 0.03 if exit_threshold == "auto" else float(exit_threshold)
             elif "kl" in criterion:
                 V = self.config.padded_vocab_size
-                log_probs = (1 / V * torch.ones(V, device=input_ids.device)).log()
+                log_probs = ((1 / V) * torch.ones(batch_size, V, device=input_ids.device)).log()
                 if criterion == "minp-kl":
                     exit_threshold = 1e-6 if exit_threshold == "auto" else float(exit_threshold)
                 else:
                     exit_threshold = 5e-4 if exit_threshold == "auto" else float(exit_threshold)
             elif criterion == "argmax-stability":
-                stable_for_n_steps = 0
-                current_argmax = torch.tensor(-1, dtype=torch.long, device=input_ids.device)
+                stable_for_n_steps = torch.zeros(batch_size, dtype=torch.long, device=input_ids.device)
+                current_argmax = torch.ones(batch_size, dtype=torch.long, device=input_ids.device) * -1
                 exit_threshold = 5 if exit_threshold == "auto" else int(exit_threshold)
             else:
                 raise ValueError("Invalid adaptive compute strategy.")
 
             all_latents = []
-            exit_values = []
+            next_token_logits = None
+
+            # Iterate through compute steps
             for compute_step in range(model_inputs["num_steps"]):
                 prev_latents = current_latents.clone()
                 current_latents, block_idx, _ = self.iterate_one_step(
                     embedded_inputs, current_latents, block_idx=block_idx, **aux_inputs
                 )
-                all_latents.append(current_latents if latent_dampening else None)
-                if step > 0:  # do not exit in prefill:
-                    if criterion == "entropy-diff":
-                        prev_entropy = entropy.clone()
-                        outputs = self.predict_from_latents(current_latents, **aux_inputs)
-                        probs = F.softmax(outputs.logits[:, -1, :], dim=-1)  # type: ignore
-                        entropy = -torch.sum(probs * torch.log(probs + 1e-10), dim=-1).mean()
-                        entropy_diff = (entropy - prev_entropy).abs()
-                        exit_values.append(entropy_diff.item())
-                        if entropy_diff < exit_threshold:
-                            break
-                    elif criterion == "latent-diff":
-                        norm_diff = (prev_latents - current_latents).norm() / current_latents.norm()
-                        exit_values.append(norm_diff.item())
-                        if norm_diff < exit_threshold:
-                            break
-                    elif criterion == "kl":
-                        prev_log_probs = log_probs.clone()
-                        outputs = self.predict_from_latents(current_latents, **aux_inputs)
-                        log_probs = F.log_softmax(outputs.logits[:, -1, :], dim=-1)  # type: ignore
-                        kl = F.kl_div(log_probs, prev_log_probs, reduction="none", log_target=True).sum(dim=-1)
-                        exit_values.append(kl.item())
-                        if kl < exit_threshold:
-                            break
-                    elif criterion == "minp-kl":
-                        prev_log_probs = log_probs.clone()
-                        outputs = self.predict_from_latents(current_latents, **aux_inputs)
-                        probs = F.softmax(outputs.logits[:, -1, :], dim=-1)  # type: ignore
-                        probs[probs < 0.1 * probs.max()] = 1 / V
-                        probs = probs / probs.sum()
-                        log_probs = probs.log()
-                        kl = F.kl_div(log_probs, prev_log_probs, reduction="none", log_target=True).sum(dim=-1)
-                        exit_values.append(kl.item())
-                        if kl < exit_threshold:
-                            break
-                    elif criterion == "argmax-stability":
-                        prev_argmax = current_argmax.clone()
-                        outputs = self.predict_from_latents(current_latents, **aux_inputs)
-                        current_argmax = outputs.logits[0, -1, :].argmax(dim=-1)  # type: ignore
-                        if current_argmax == prev_argmax:
-                            stable_for_n_steps += 1
-                        else:
-                            stable_for_n_steps = 0
-                        exit_values.append(stable_for_n_steps)
-                        if stable_for_n_steps >= exit_threshold:
-                            break
-                    elif criterion == "none":
-                        pass
 
+                if latent_dampening:
+                    all_latents.append(current_latents)
+
+                outputs = self.predict_from_latents(current_latents, **aux_inputs)
+                logits: torch.Tensor = outputs.logits  # type: ignore
+                if step > 0:  # do not exit in prefill:
+                    # Check exit condition for each sequence in batch
+                    if criterion == "entropy-diff":
+                        prev_entropy = entropy
+                        probs = F.softmax(logits[:, -1, :], dim=-1)
+                        entropy = -torch.sum(probs * torch.log(probs + 1e-10), dim=-1)
+                        exit_values = (entropy - prev_entropy).abs()
+
+                    elif criterion == "latent-diff":
+                        norm_diff = (prev_latents - current_latents).norm(dim=-1) / current_latents.norm(dim=-1)
+                        exit_values = norm_diff.mean(dim=-1)
+
+                    elif "kl" in criterion:
+                        prev_log_probs = log_probs
+                        if criterion == "minp-kl":
+                            probs = F.softmax(logits[:, -1, :], dim=-1)
+                            max_probs = probs.max(dim=-1, keepdim=True)[0]
+                            probs_mask = probs < (0.1 * max_probs)
+                            masked_probs = probs
+                            masked_probs[probs_mask] = 1 / V
+                            probs = masked_probs / masked_probs.sum(dim=-1, keepdim=True)
+                            log_probs = probs.log()
+                        else:
+                            log_probs = F.log_softmax(logits[:, -1, :], dim=-1)
+                        exit_values = F.kl_div(log_probs, prev_log_probs, reduction='none', log_target=True).sum(dim=-1)
+
+                    elif criterion == "argmax-stability":
+                        prev_argmax = current_argmax
+                        current_argmax = logits[:, -1, :].argmax(dim=-1)
+                        stable_for_n_steps = torch.where(
+                            current_argmax == prev_argmax,
+                            stable_for_n_steps + 1,
+                            torch.zeros_like(stable_for_n_steps)
+                        )
+                        exit_values = stable_for_n_steps
+
+                    # Record values and check exits for each sequence
+                    for i in range(batch_size):
+                        if not exit_reached[i] and not finished_sequences[i]:
+                            exit_values_per_seq[i].append(exit_values[i].item())
+
+                    new_exits = (exit_values < exit_threshold if criterion != "argmax-stability" else exit_values >= exit_threshold)
+                    new_exits = new_exits & ~exit_reached & ~finished_sequences
+
+                    if new_exits.any():
+                        exit_reached = exit_reached | new_exits
+                        if next_token_logits is None:
+                            next_token_logits = logits[:, -1, :].clone()
+                        else:
+                            next_token_logits = torch.where(
+                                new_exits.unsqueeze(1).expand_as(logits[:, -1, :]),
+                                logits[:, -1, :],
+                                next_token_logits
+                            )
+                        for i in range(batch_size):
+                            if new_exits[i]:
+                                compute_steps_per_seq[i] = compute_step + 1
+
+                    # If all sequences have exited, break early
+                    if (exit_reached | finished_sequences).all():
+                        break
+            # This else is if the for loop finished without breaking
             else:
-                if not latent_dampening:
-                    outputs = self.predict_from_latents(current_latents, **aux_inputs)
-                else:
+                if latent_dampening:
                     dampened_latents = torch.sum(torch.cat(all_latents, dim=0), dim=0, keepdim=True)
                     outputs = self.predict_from_latents(dampened_latents, **aux_inputs)
-            compute_steps.append([compute_step + 1, exit_values])
 
-            next_token_logits = outputs.logits[0, -1, :]  # type: ignore
-            if continuous_compute:  # Save last latent
-                current_last_latent = current_latents[:, -1:, :]
+                # For sequences that didn't exit early, use the final logits
+                if next_token_logits is None:
+                    next_token_logits = outputs.logits[:, -1, :]  # type: ignore
+                else:
+                    # Only update logits for sequences that didn't exit early
+                    non_exit_mask = ~exit_reached & ~finished_sequences
+                    next_token_logits = torch.where(
+                        non_exit_mask.unsqueeze(1).expand_as(next_token_logits),
+                        outputs.logits[:, -1, :],  # type: ignore
+                        next_token_logits
+                    )
 
-            # Sample or select next token
+                    # Record compute steps for non-exited sequences
+                    for i in range(batch_size):
+                        if non_exit_mask[i]:
+                            compute_steps_per_seq[i] = model_inputs["num_steps"]
+
+            # Save latent states for continuous compute if enabled
+            if continuous_compute:
+                current_last_latents = current_latents[:, -1:, :]
+
+            # Record compute steps for this token generation
+            compute_steps.append([compute_steps_per_seq, exit_values_per_seq])
+
+            # Sample or select next token based on generation config
             if generation_config.do_sample:
-                if generation_config.temperature:
-                    next_token_logits = next_token_logits / generation_config.temperature
-
-                probs = F.softmax(next_token_logits, dim=-1)
-                # Apply top_k
-                if generation_config.top_k:
-                    top_k_probs, _ = torch.topk(probs, generation_config.top_k)
-                    probs[probs < top_k_probs[-1]] = 0
-                # Apply top_p
-                if generation_config.top_p:
-                    sorted_probs = torch.sort(probs, descending=True)[0]
-                    cumsum = torch.cumsum(sorted_probs, dim=-1)
-                    probs[cumsum > generation_config.top_p] = 0
-                # Apply min_p
-                if generation_config.min_p:
-                    probs[probs < generation_config.min_p * probs.max()] = 0
-
-                probs = probs / probs.sum()
-                next_token = torch.multinomial(probs, num_samples=1)
+                next_token = self._sample_next_token(
+                    next_token_logits, 
+                    generation_config.temperature, 
+                    generation_config.top_k,
+                    generation_config.top_p,
+                    generation_config.min_p
+                )
             else:
-                next_token = torch.argmax(next_token_logits, dim=-1, keepdim=True)
+                next_token = torch.argmax(next_token_logits, dim=-1, keepdim=True)  # type: ignore
 
-            input_ids = torch.cat([input_ids, next_token[None, :]], dim=-1)  # type: ignore
+            input_ids = torch.cat([input_ids, next_token], dim=-1)  # type: ignore
 
             if streamer:
                 streamer.put(next_token.cpu())
 
             # Update model kwargs
             model_kwargs = self._update_model_kwargs_for_generation(outputs, model_kwargs)
+            if continuous_compute:
+                model_kwargs["input_states"] = current_last_latents
 
-            # Check if we hit a stop token
-            if stop_tokens is not None and next_token in stop_tokens:
+            # Check for finished sequences
+            for i in range(batch_size):
+                if not finished_sequences[i] and stop_tokens is not None and next_token[i, 0] in stop_tokens:
+                    finished_sequences[i] = True
+
+            # Break if all sequences are finished
+            if finished_sequences.all():
                 break
 
         if streamer:
@@ -930,6 +977,55 @@ class RavenForCausalLM(RavenPreTrainedModel, GenerationMixin):
                 token_id = tokenizer(s, add_special_tokens=False)["input_ids"][0]
                 stop_tokens.add(token_id)
         return torch.tensor(list(stop_tokens))
+
+    def _sample_next_token(
+        self, 
+        next_token_logits, 
+        temperature=None, 
+        top_k=None, 
+        top_p=None, 
+        min_p=None
+    ):
+        """Helper function to sample the next token."""
+        if temperature:
+            next_token_logits = next_token_logits / temperature
+
+        probs = F.softmax(next_token_logits, dim=-1)
+
+        # Apply top_k
+        if top_k:
+            top_k_values, _ = torch.topk(probs, top_k, dim=-1)
+            min_values = top_k_values[:, -1].unsqueeze(-1).expand_as(probs)
+            probs = torch.where(probs < min_values, torch.zeros_like(probs), probs)
+
+        # Apply top_p (nucleus sampling)
+        if top_p:
+            sorted_probs, sorted_indices = torch.sort(probs, descending=True, dim=-1)
+            cumulative_probs = torch.cumsum(sorted_probs, dim=-1)
+
+            # Create mask for probs to keep
+            remove_indices = cumulative_probs > top_p
+            remove_indices[:, 0] = False  # Keep at least the top probability
+
+            # Convert sorted indices mask back to original indices mask
+            mask = torch.zeros_like(probs, dtype=torch.bool)
+            for i in range(probs.shape[0]):
+                mask[i, sorted_indices[i, remove_indices[i]]] = True
+            
+            probs = torch.where(mask, torch.zeros_like(probs), probs)
+
+        # Apply min_p
+        if min_p:
+            max_probs = probs.max(dim=-1, keepdim=True)[0]
+            min_p_threshold = min_p * max_probs
+            probs = torch.where(probs < min_p_threshold, torch.zeros_like(probs), probs)
+
+        # Renormalize probabilities
+        probs = probs / probs.sum(dim=-1, keepdim=True).clamp(min=1e-10)
+
+        # Sample from the distribution
+        next_token = torch.multinomial(probs, num_samples=1)
+        return next_token
 
     def get_stats(self, logits, x, latent_states, xk, input_embeds, num_steps_no_grad, num_steps_with_grad):
         probs = torch.softmax(logits.float(), dim=-1)
