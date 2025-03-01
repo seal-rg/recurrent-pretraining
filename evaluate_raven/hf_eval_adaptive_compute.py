@@ -23,6 +23,7 @@ def update_huggingface_implementation(model):
     # for name, module in model.named_modules():
     #     if module.__class__.__name__ == "CausalSelfAttention":
     #         module.forward = types.MethodType(CausalSelfAttention.forward, module)
+    model.generate = types.MethodType(RavenForCausalLM.generate, model)
     model.generate_with_adaptive_compute = types.MethodType(RavenForCausalLM.generate_with_adaptive_compute, model)
 
 
@@ -37,6 +38,8 @@ class HuginnWrapper(HFLM):
         criterion: Optional[Literal["entropy-diff", "latent-diff", "minp-kl", "argmax-stability"]] = "entropy-diff",
         exit_threshold: Optional[Union[str, float, int]] = "auto",
         lookup_strategy: str = "full",
+        continuous_compute: bool = False,
+        latent_dampening: bool = False,
         # override whether the model should be treated as decoder-only (causal) or encoder-decoder (seq2seq)
         revision: Optional[str] = "main",
         subfolder: Optional[str] = None,
@@ -101,64 +104,31 @@ class HuginnWrapper(HFLM):
         self.criterion = criterion
         self.exit_threshold = exit_threshold
         self.lookup_strategy = lookup_strategy
+        self.continuous_compute = continuous_compute
+        self.latent_dampening = latent_dampening
         update_huggingface_implementation(self.model)
 
-    @property
-    def model(self) -> RavenForCausalLM:
-        # returns the model, unwrapping it if using Accelerate
-        if hasattr(self, "accelerator"):
-            return self.accelerator.unwrap_model(self._model)
-        else:
-            return self._model # type: ignore
-
     def _model_generate(self, context, max_length, stop, **generation_kwargs):
-        """
-        This function has been mostly copied from HFLM's `_model_generate` method as is, 
-        except for the addition of the `generate_with_adaptive_compute` method.
-        This is to pass in more custom arguments to the `generate_with_adaptive_compute` method
-        than normally supported.
-        """
-        # temperature = 0.0 if not set
-        # if do_sample is false and temp==0.0:
-        # remove temperature, as do_sample=False takes care of this
-        # and we don't want a warning from HF
-        generation_kwargs["temperature"] = generation_kwargs.get("temperature", 0.0)
-        do_sample = generation_kwargs.get("do_sample", None)
-
-        # The temperature has to be a strictly positive float -- if it is 0.0, use greedy decoding strategies
-        if generation_kwargs.get("temperature") == 0.0 and do_sample is None:
-            generation_kwargs["do_sample"] = do_sample = False
-
-        if do_sample is False and generation_kwargs.get("temperature") == 0.0:
-            generation_kwargs.pop("temperature")
-        # build stopping criteria
-        stopping_criteria = stop_sequences_criteria(
-            self.tokenizer, stop, context.shape[1], context.shape[0] # type: ignore
+        # The generation configs is only used by the custom generate function call, 
+        # whereas the standard generate function call uses these args directly passed in.
+        # So we need to pass both, and have the dispatching generate function call decide which to use.
+        generation_config = GenerationConfig(
+            max_length=max_length,
+            use_cache=True,
+            pad_token_id=self.tokenizer.pad_token_id,
         )
-        if self.criterion is None or self.exit_threshold is None:
-            return self.model.generate(
-                input_ids=context,
-                max_length=max_length,
-                stopping_criteria=stopping_criteria,
-                pad_token_id=self.tokenizer.pad_token_id,
-                use_cache=True,
-                **generation_kwargs,
-            )
-        else:
-            generation_config = GenerationConfig(
-                max_length=max_length,
-                use_cache=True,
-                pad_token_id=self.tokenizer.pad_token_id,
-            )
-            return self.model.generate_with_adaptive_compute(
-                input_ids=context,
-                generation_config=generation_config,
-                criterion=self.criterion,
-                exit_threshold=self.exit_threshold,
-                stopping_criteria=stopping_criteria,
-                cache_kwargs={"lookup_strategy": self.lookup_strategy},
-                **generation_kwargs,
-            )
+        return super()._model_generate(
+            context,
+            max_length,
+            stop,
+            generation_config=generation_config,
+            criterion=self.criterion, 
+            exit_threshold=self.exit_threshold, 
+            cache_kwargs={"lookup_strategy": self.lookup_strategy},
+            continuous_compute=self.continuous_compute,
+            latent_dampening=self.latent_dampening,
+            **generation_kwargs
+        )
 
 
 def evaluate_single_task(
@@ -172,6 +142,8 @@ def evaluate_single_task(
     exit_threshold: Optional[Union[str, float, int]] = "auto",
     num_steps=32,
     lookup_strategy="full",
+    continuous_compute=False,
+    latent_dampening=False,
 ):
     config_args = {
         "task_name": task_name,
@@ -195,7 +167,9 @@ def evaluate_single_task(
         dtype="bfloat16",
         criterion=criterion,
         exit_threshold=exit_threshold,
-        lookup_strategy=lookup_strategy
+        lookup_strategy=lookup_strategy,
+        continuous_compute=continuous_compute,
+        latent_dampening=latent_dampening,
     )
     results = evaluator.simple_evaluate(
         model=model,
@@ -223,24 +197,27 @@ if __name__ == "__main__":
     parser.add_argument("--criterion", type=str, default="entropy-diff", 
                         choices=["entropy-diff", "latent-diff", "minp-kl", "argmax-stability", "none"],
                         help="Criterion for adaptive compute. Pass `none` to disable adaptive compute.")
-    parser.add_argument("--exit-threshold", dest="exit_threshold", type=str, default="auto", help="Exit threshold for adaptive compute")
+    parser.add_argument("--exit-threshold", dest="exit_threshold", type=str, default="auto",
+                        help="Exit threshold for adaptive compute. Pass `none` to disable adaptive compute.")
     parser.add_argument("--num-steps", dest="num_steps", type=int, default=32, help="Number of steps for generation")
     parser.add_argument("--lookup-strategy", dest="lookup_strategy", type=str, default="full", 
                         help="Lookup strategy for caching, also supports values like `compression-s4`")
-    
+    parser.add_argument("--continuous-compute", dest="continuous_compute", type=bool, default=False, help="Continuous compute")
+    parser.add_argument("--latent-dampening", dest="latent_dampening", type=bool, default=False, help="Latent dampening")
+
     args = parser.parse_args()
-    
+
     # Convert 'none' to None for criterion
     criterion = None if args.criterion == "none" else args.criterion
-    
+
     # Try to convert exit_threshold to float if it's numeric
-    exit_threshold = args.exit_threshold
-    if exit_threshold != "auto":
+    exit_threshold = None if args.exit_threshold == "none" else args.exit_threshold
+    if exit_threshold != "auto" and exit_threshold is not None:
         try:
             exit_threshold = float(exit_threshold)
         except ValueError:
             pass  # Keep as string if not convertible to float
-    
+
     results = evaluate_single_task(
         task_name=args.task_name,
         model_name=args.model_name,
@@ -252,4 +229,6 @@ if __name__ == "__main__":
         exit_threshold=exit_threshold,
         num_steps=args.num_steps,
         lookup_strategy=args.lookup_strategy,
+        continuous_compute=args.continuous_compute,
+        latent_dampening=args.latent_dampening,
     )
