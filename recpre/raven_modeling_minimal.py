@@ -830,12 +830,12 @@ class RavenForCausalLM(RavenPreTrainedModel, GenerationMixin):
                 if latent_dampening:
                     all_latents.append(current_latents)
 
-                outputs = self.predict_from_latents(current_latents, **aux_inputs)
-                logits: torch.Tensor = outputs.logits  # type: ignore
                 if step > 0:  # do not exit in prefill:
                     # Check exit condition for each sequence in batch
                     if criterion == "entropy-diff":
                         prev_entropy = entropy
+                        outputs = self.predict_from_latents(current_latents, **aux_inputs)
+                        logits: torch.Tensor = outputs.logits  # type: ignore
                         probs = F.softmax(logits[:, -1, :], dim=-1)
                         entropy = -torch.sum(probs * torch.log(probs + 1e-10), dim=-1)
                         exit_values = (entropy - prev_entropy).abs()
@@ -845,6 +845,8 @@ class RavenForCausalLM(RavenPreTrainedModel, GenerationMixin):
                         exit_values = norm_diff.mean(dim=-1)
 
                     elif "kl" in criterion:
+                        outputs = self.predict_from_latents(current_latents, **aux_inputs)
+                        logits: torch.Tensor = outputs.logits  # type: ignore
                         prev_log_probs = log_probs
                         if criterion == "minp-kl":
                             probs = F.softmax(logits[:, -1, :], dim=-1)
@@ -860,6 +862,8 @@ class RavenForCausalLM(RavenPreTrainedModel, GenerationMixin):
 
                     elif criterion == "argmax-stability":
                         prev_argmax = current_argmax
+                        outputs = self.predict_from_latents(current_latents, **aux_inputs)
+                        logits: torch.Tensor = outputs.logits  # type: ignore
                         current_argmax = logits[:, -1, :].argmax(dim=-1)
                         stable_for_n_steps = torch.where(
                             current_argmax == prev_argmax,
@@ -878,6 +882,11 @@ class RavenForCausalLM(RavenPreTrainedModel, GenerationMixin):
 
                     if new_exits.any():
                         exit_reached = exit_reached | new_exits
+                        if criterion == "latent-diff":
+                            # Normally we don't compute the output for latent-diff, but when there is an exit, 
+                            # we need to compute and save the output
+                            outputs = self.predict_from_latents(current_latents, **aux_inputs)
+                            logits: torch.Tensor = outputs.logits  # type: ignore
                         if next_token_logits is None:
                             next_token_logits = logits[:, -1, :].clone()
                         else:
@@ -895,7 +904,9 @@ class RavenForCausalLM(RavenPreTrainedModel, GenerationMixin):
                         break
             # This else is if the for loop finished without breaking
             else:
-                if latent_dampening:
+                if not latent_dampening:
+                    outputs = self.predict_from_latents(current_latents, **aux_inputs)
+                else:
                     dampened_latents = torch.sum(torch.cat(all_latents, dim=0), dim=0, keepdim=True)
                     outputs = self.predict_from_latents(dampened_latents, **aux_inputs)
 
