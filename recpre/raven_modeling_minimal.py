@@ -25,6 +25,7 @@ class RavenPreTrainedModel(PreTrainedModel):
     supports_gradient_checkpointing = True
     _no_split_modules = ["SandwichBlock"]
     _skip_keys_device_placement = ["past_key_values"]
+    _tied_weights_keys = ["lm_head.weight"]
     _supports_flash_attn_2 = True
     _supports_sdpa = True
     _supports_cache_class = True
@@ -63,7 +64,7 @@ class RMSNorm(torch.nn.Module):
         return x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + self.eps)
 
     def forward(self, x):
-        with torch.autocast(enabled=False, device_type=x.device.type):
+        with torch.autocast(enabled=False, device_type=x.device.type if x.device.type != "meta" else "cuda"):
             return self._norm(x.float()).type_as(x) * self.weight
 
     def reset_parameters(self) -> None:
@@ -342,9 +343,15 @@ class RavenForCausalLM(RavenPreTrainedModel, GenerationMixin):
         # Head
         self.lm_head = torch.nn.Linear(config.n_embd, config.padded_vocab_size, bias=False)
         if self.config.tie_embeddings:
-            self.lm_head.weight = self.transformer.wte.weight
+            self.tie_weights()
         # rope
         self.register_buffer("freqs_cis", self._precompute_freqs_cis(), persistent=True)
+
+    def get_input_embeddings(self):
+        return self.transformer.wte
+
+    def get_output_embeddings(self):
+        return self.lm_head
 
     def _precompute_freqs_cis(self):
         # can actually be a buffer now, and remains in fp32! (at least in the settings I tested)
@@ -461,7 +468,7 @@ class RavenForCausalLM(RavenPreTrainedModel, GenerationMixin):
         elif hasattr(num_steps, "__len__") and len(num_steps) > 1:
             num_steps_no_grad, num_steps_with_grad = num_steps
         else:
-            num_steps_no_grad, num_steps_with_grad = num_steps, torch.tensor(0)
+            num_steps_no_grad, num_steps_with_grad = num_steps, torch.tensor(0) if not x.is_meta else 0
 
         with torch.no_grad():
             # ultra annoying in ddp due to
@@ -492,7 +499,7 @@ class RavenForCausalLM(RavenPreTrainedModel, GenerationMixin):
         attn_maps: dict = {},
         return_attn: bool = False,
     ):
-        x = self.transformer.adapter(torch.cat([x, input_embeds], dim=-1))
+        x = self.transformer.adapter(torch.cat([x, input_embeds.to(x.device)], dim=-1))
         for idx, block in enumerate(self.transformer.core_block, start=1):
             x, attn_map = block(x, freqs_cis, block_idx + idx, mask, past_key_values, return_attn=return_attn)
             attn_maps[block_idx + idx] = attn_map
@@ -594,6 +601,10 @@ class RavenForCausalLM(RavenPreTrainedModel, GenerationMixin):
         """Outputs are long tensors so that they can be passed through compiled functions"""
         t = max(self.config.mean_recurrence - self.config.mean_backprop_depth, 0)
         s = self.config.mean_backprop_depth
+        if torch.rand((1,)).is_meta:  # annoying clause to make meta-tensor-based flop counting work
+            # these values are only the mean TFLOPs of the randomized sampler
+            # Note that this clause also breaks the contract, and returns ints in meta tensor mode
+            return t, s  # type: ignore
         if self.training:
             sigma = 0.5
             mu = math.log(t + s) - (sigma**2 / 2)
@@ -770,12 +781,12 @@ class RavenForCausalLM(RavenPreTrainedModel, GenerationMixin):
         stop_tokens = self._get_stops(generation_config, tokenizer).to(input_ids.device)
         batch_size = input_ids.shape[0]
         compute_steps = []
-        
+
         # Set up continuous compute if enabled
         if continuous_compute:
             embedded_inputs, _, _ = self.embed_inputs(input_ids)
             current_last_latents = self.initialize_state(embedded_inputs)
-        
+
         # Track which sequences have finished
         finished_sequences = torch.zeros(batch_size, dtype=torch.bool, device=input_ids.device)
 
@@ -858,7 +869,7 @@ class RavenForCausalLM(RavenPreTrainedModel, GenerationMixin):
                             log_probs = probs.log()
                         else:
                             log_probs = F.log_softmax(logits[:, -1, :], dim=-1)
-                        exit_values = F.kl_div(log_probs, prev_log_probs, reduction='none', log_target=True).sum(dim=-1)
+                        exit_values = F.kl_div(log_probs, prev_log_probs, reduction="none", log_target=True).sum(dim=-1)
 
                     elif criterion == "argmax-stability":
                         prev_argmax = current_argmax
@@ -866,9 +877,7 @@ class RavenForCausalLM(RavenPreTrainedModel, GenerationMixin):
                         logits: torch.Tensor = outputs.logits  # type: ignore
                         current_argmax = logits[:, -1, :].argmax(dim=-1)
                         stable_for_n_steps = torch.where(
-                            current_argmax == prev_argmax,
-                            stable_for_n_steps + 1,
-                            torch.zeros_like(stable_for_n_steps)
+                            current_argmax == prev_argmax, stable_for_n_steps + 1, torch.zeros_like(stable_for_n_steps)
                         )
                         exit_values = stable_for_n_steps
 
@@ -877,13 +886,17 @@ class RavenForCausalLM(RavenPreTrainedModel, GenerationMixin):
                         if not exit_reached[i] and not finished_sequences[i]:
                             exit_values_per_seq[i].append(exit_values[i].item())
 
-                    new_exits = (exit_values < exit_threshold if criterion != "argmax-stability" else exit_values >= exit_threshold)
+                    new_exits = (
+                        exit_values < exit_threshold
+                        if criterion != "argmax-stability"
+                        else exit_values >= exit_threshold
+                    )
                     new_exits = new_exits & ~exit_reached & ~finished_sequences
 
                     if new_exits.any():
                         exit_reached = exit_reached | new_exits
                         if criterion == "latent-diff":
-                            # Normally we don't compute the output for latent-diff, but when there is an exit, 
+                            # Normally we don't compute the output for latent-diff, but when there is an exit,
                             # we need to compute and save the output
                             outputs = self.predict_from_latents(current_latents, **aux_inputs)
                             logits: torch.Tensor = outputs.logits  # type: ignore
@@ -891,9 +904,7 @@ class RavenForCausalLM(RavenPreTrainedModel, GenerationMixin):
                             next_token_logits = logits[:, -1, :].clone()
                         else:
                             next_token_logits = torch.where(
-                                new_exits.unsqueeze(1).expand_as(logits[:, -1, :]),
-                                logits[:, -1, :],
-                                next_token_logits
+                                new_exits.unsqueeze(1).expand_as(logits[:, -1, :]), logits[:, -1, :], next_token_logits
                             )
                         for i in range(batch_size):
                             if new_exits[i]:
@@ -919,7 +930,7 @@ class RavenForCausalLM(RavenPreTrainedModel, GenerationMixin):
                     next_token_logits = torch.where(
                         non_exit_mask.unsqueeze(1).expand_as(next_token_logits),
                         outputs.logits[:, -1, :],  # type: ignore
-                        next_token_logits
+                        next_token_logits,
                     )
 
                     # Record compute steps for non-exited sequences
@@ -937,11 +948,11 @@ class RavenForCausalLM(RavenPreTrainedModel, GenerationMixin):
             # Sample or select next token based on generation config
             if generation_config.do_sample:
                 next_token = self._sample_next_token(
-                    next_token_logits, 
-                    generation_config.temperature, 
+                    next_token_logits,
+                    generation_config.temperature,
                     generation_config.top_k,
                     generation_config.top_p,
-                    generation_config.min_p
+                    generation_config.min_p,
                 )
             else:
                 next_token = torch.argmax(next_token_logits, dim=-1, keepdim=True)  # type: ignore
@@ -989,14 +1000,7 @@ class RavenForCausalLM(RavenPreTrainedModel, GenerationMixin):
                 stop_tokens.add(token_id)
         return torch.tensor(list(stop_tokens))
 
-    def _sample_next_token(
-        self, 
-        next_token_logits, 
-        temperature=None, 
-        top_k=None, 
-        top_p=None, 
-        min_p=None
-    ):
+    def _sample_next_token(self, next_token_logits, temperature=None, top_k=None, top_p=None, min_p=None):
         """Helper function to sample the next token."""
         if temperature:
             next_token_logits = next_token_logits / temperature
@@ -1022,7 +1026,7 @@ class RavenForCausalLM(RavenPreTrainedModel, GenerationMixin):
             mask = torch.zeros_like(probs, dtype=torch.bool)
             for i in range(probs.shape[0]):
                 mask[i, sorted_indices[i, remove_indices[i]]] = True
-            
+
             probs = torch.where(mask, torch.zeros_like(probs), probs)
 
         # Apply min_p
