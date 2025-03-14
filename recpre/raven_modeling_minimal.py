@@ -660,11 +660,10 @@ class RavenForCausalLM(RavenPreTrainedModel, GenerationMixin):
 
     @torch.no_grad()
     def generate(self, *args, **kwargs):
-        """Dispatcher - use HF generate in all normal cases."""
-        if any(
-            k in kwargs
-            for k in ("continuous_compute", "latent_dampening", "criterion", "exit_threshold", "cache_kwargs")
-        ):
+        """Dispatcher - use HF generate in all normal cases.
+        If BOTH `criterion` AND `exit_threshold` are provided as not None, we use adaptive compute.
+        """
+        if kwargs.get("criterion", None) is not None and kwargs.get("exit_threshold", None) is not None:
             print("Dispatching to custom generate function call")
             return self.generate_with_adaptive_compute(*args, **kwargs)
         else:
