@@ -37,10 +37,14 @@ lm_eval --model hf  \
 --system_instruction="You are a helpful assistant that can assist users with mathematical reasoning."  \ 
 ```
 
+## Data
+
+We have uploaded the entire training dataset to Hugging Face, you can find it here: https://huggingface.co/datasets/tomg-group-umd/huginn-dataset.
+This upload contains 4096 parquet files (for training and validation each), exactly corresponding to the 4096 AMD GPUs used to train the model data-parallel. Each row contains 4096+1 tokens, so one training step (we train with a local microbatch size of 1) corresponds to exactly one row of each file.
 
 ## The grim details
 
-What steps would you have to take if you were to replicate this model training run on an AMD cluster? Follow this outline (and please ask for more details when you're stuck).
+What steps would you have to take if you were to replicate this model training and data collection run on an AMD cluster? Follow this outline (and please ask for more details when you're stuck).
 
 1. Use `scripts/tokenizer_generation.py` to generate the tokenizer. Before you run the script, adapt all paths for your system. Data download is automatic. You also need the BPE trainer from https://github.com/gautierdag/bpeasy.
 2. Run `scripts/scalable_data_download.py` to download all raw datasets. The name of the script is a lie, this is not so scalable, it will take a long time, lots of space and fail due to random errors. You'll also notice that there a number of extra rules hardcoded in the script for various badly formatting datasets. By the time you run this script, some of these authors may have updated their dataset breaking assumptions set here. You would get an error in that case, and would need to investigate that particular dataset. After this step, you'd have all raw datasets in a `staging` folder.
@@ -49,7 +53,6 @@ What steps would you have to take if you were to replicate this model training r
 5. Define your own launch config in `launch_configs/` or use our config, and launch `train.py` onto your cluster. We launched onto frontier with the launcher file called `launch_frontier.py`, but this will not help you on a different cluster. Follow your cluster's best practices and environment flag guidelines when setting up a large-scale run. The core command is just `python train.py --config=launch_configs/your_config.yaml`.
 6. Watch it train (hopefully). You can add additional segments to the training run as needed.
 
-We are currently looking to find a reliable way to host the entire pre-processed dataset, which would save you steps 1-4. We'll update here once this has happened.
 
 ## License
 This code is released under an [apache-2.0](https://choosealicense.com/licenses/apache-2.0/)  license. Part of the code is licensed under the Lightning AI Apache-2.0 license.
