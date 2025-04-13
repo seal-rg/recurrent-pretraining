@@ -21,6 +21,22 @@ The code to run the model at inference is probablier easier to look at, if you j
 It can be found on all Huggingface repos of this model, and at `recpre/raven_modeling_minimal.py`.
 
 
+## Reproducing Benchmark Scores
+
+All benchmark scores reported in the paper are computed using the lm-eval harness, except for the code tasks, which are executed using bigcode. For default benchmarks, you can run `lm-eval` like so (no installation necessary):
+
+```
+lm_eval --model hf --model_args pretrained=tomg-group-umd/huginn-0125,trust_remote_code=True,dtype=bfloat16,mean_recurrence=32 --tasks hellaswag --batch_size=auto --num_fewshot=0
+```
+
+For GSM8k, "w/ sys. prompt" refers to the following invocation, using this system prompt, and chat formatting:
+```
+lm_eval --model hf  \
+--model_args pretrained=tomg-group-umd/huginn-0125,trust_remote_code=True,dtype=bfloat16,mean_recurrence=32  \ 
+--tasks gsm8k_cot  --batch_size=auto  --apply_chat_template=True --fewshot_as_multiturn \
+--system_instruction="You are a helpful assistant that can assist users with mathematical reasoning."  \ 
+```
+
 
 ## The grim details
 
