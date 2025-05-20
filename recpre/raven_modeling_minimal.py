@@ -891,6 +891,11 @@ class RavenForCausalLM(RavenPreTrainedModel, GenerationMixin):
         self.generation_config = args[1] if len(args) > 1 else self.generation_config
         if any(k in kwargs for k in ("criterion", "exit_threshold")):
             # print("Dispatching to custom generate_adaptive function call")
+        """Dispatcher - use HF generate in all normal cases.
+        If BOTH `criterion` AND `exit_threshold` are provided as not None, we use adaptive compute.
+        """
+        if kwargs.get("criterion", None) is not None and kwargs.get("exit_threshold", None) is not None:
+            print("Dispatching to custom generate function call")
             return self.generate_with_adaptive_compute(*args, **kwargs)
         elif "continuous_compute" in kwargs:
             # print("Dispatching to custom generate_minimal function call")
