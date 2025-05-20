@@ -73,6 +73,9 @@ class RavenConfig(PretrainedConfig):
         self.rope_base = rope_base
         self.torch_dtype = torch_dtype  # Added from JSON
         self.transformers_version = transformers_version  # Added from JSON
+        # inference
+        self.test_time_noise = 0
+        self.test_time_noise_type = "fixed"
         # Derived
         self.num_key_value_heads = n_heads
         self.num_attention_heads = n_heads
