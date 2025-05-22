@@ -10,7 +10,7 @@ I (Jonas) do not necessarily think that you should pretrain your own model with 
 
 
 ## Code Setup:
-*  The actual model definition is in `repre/model_dynamic.py`.
+*  The actual model definition is in `recpre/model_dynamic.py`.
 *  The training is orchestrated from `train.py`.
 *  Model shapes can be found in `recpre/model_registry.py`. The final model is the shape `nebel-raven-3.5b`
 *  The configurations for our two large-scale runs are in `launch_configs/`. 
