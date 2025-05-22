@@ -37,6 +37,16 @@ lm_eval --model hf  \
 --system_instruction="You are a helpful assistant that can assist users with mathematical reasoning."  \ 
 ```
 
+To reproduce humaneval scores, you nowadays do not need to install bigcode-eval directly, but you can also use the lm-eval harness, like so
+``` 
+HF_ALLOW_CODE_EVAL=1 accelerate launch -m lm_eval \
+--model hf --model_args pretrained=tomg-group-umd/huginn-0125,mean_recurrence=32,trust_remote_code=True,dtype=bfloat16  \
+--tasks humaneval_instruct --batch_size=1 --num_fewshot=0  \
+--output_path=outputs/heval --confirm_run_unsafe_code \
+--apply_chat_template=True \
+ --gen_kwargs=do_sample=True,temperature=0.2,top_p=0.95
+``` 
+
 ## Data
 
 We have uploaded the entire training dataset to Hugging Face, you can find it here: https://huggingface.co/datasets/tomg-group-umd/huginn-dataset.
