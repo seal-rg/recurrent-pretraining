@@ -1,10 +1,11 @@
-"""Minimal modeling.py file for HF compatibility and zero-shot experiments."""
+"""Modeling file for HF compatibility and zero-shot experiments."""
 
 import torch
 import math
 
 from torch import Tensor
 from torch.nn.attention.flex_attention import create_block_mask, BlockMask, flex_attention
+from torch.nn.attention import bias as attn_bias
 from dataclasses import dataclass
 from typing import Union, Optional, Any
 
@@ -19,6 +20,8 @@ from transformers.generation.utils import GenerateDecoderOnlyOutput
 
 import torch.nn.functional as F
 from transformers import GenerationConfig
+
+torch.backends.cuda.enable_math_sdp(False)
 
 
 class RavenPreTrainedModel(PreTrainedModel):
@@ -96,10 +99,17 @@ class HuginnDynamicCache(DynamicCache):
         step_idx: int = int(step_idx_tensor)  # todo: fix dicts with tensor step_idx, currently the memberships fail
         lookup_strategy = self.lookup_strategy if lookup_strategy is None else lookup_strategy
         if "compress-" in self.lookup_strategy and step_idx > 1:  # hardcode for current model!
-            compression_stage = int(self.lookup_strategy.split("compress-")[1][1:])
             if "compress-s" in self.lookup_strategy:
+                compression_stage = int(self.lookup_strategy.split("compress-")[1][1:])
                 new_step_idx = (step_idx - 2) % compression_stage + 2
-            else:
+            elif "compress-anchor" in self.lookup_strategy:
+                if step_idx - 2 < 4 * 8:  # anchor onto first 8 recurrence steps  # noqa: SIM108
+                    new_step_idx = step_idx
+                else:  # then re-use the next 4 KV states = one recurrence for all future recurrence
+                    new_step_idx = 34 + (step_idx - 34) % 4
+                # print(step_idx, new_step_idx)
+            else:  # compress-r
+                compression_stage = int(self.lookup_strategy.split("compress-")[1][1:])
                 new_step_idx = (step_idx - 2) // compression_stage + 2
             step_idx = new_step_idx
         # Init
@@ -136,8 +146,6 @@ class HuginnDynamicCache(DynamicCache):
                         max_step = max([s for s in valid_steps if s >= 2 and s % 4 == step_idx % 4])
                     else:
                         max_step = step_idx if token_pos in self.key_cache[step_idx] else 0
-                    if max_step is None:
-                        raise ValueError(f"No cache entry found for token position {token_pos}")
                     latest_keys.append(self.key_cache[max_step][token_pos])
                     latest_values.append(self.value_cache[max_step][token_pos])
                 return torch.stack(latest_keys, dim=-2), torch.stack(latest_values, dim=-2)
@@ -165,8 +173,6 @@ class HuginnDynamicCache(DynamicCache):
                         max_step = max([s for s in valid_steps if s >= 2 and s % 4 == step_idx % 4])
                     else:
                         max_step = step_idx if token_pos in self.key_cache[step_idx] else 0
-                    if max_step is None:
-                        raise ValueError(f"No cache entry found for token position {token_pos}")
                     latest_keys.append(self.key_cache[max_step][token_pos])
                     latest_values.append(self.value_cache[max_step][token_pos])
                 return torch.stack(latest_keys, dim=-2), torch.stack(latest_values, dim=-2)
@@ -203,6 +209,20 @@ class HuginnDynamicCache(DynamicCache):
         self._seen_tokens = 0
         self.key_cache.clear()
         self.value_cache.clear()
+
+    def clear_last_k_entries(self, k: int = 0):
+        """Partially clear cache."""
+        assert self._seen_tokens >= k
+        self._seen_tokens = self._seen_tokens - k
+        # self.key_cache[step_idx][self._seen_tokens - key_states.shape[-2] + idx] = entry
+        self.key_cache = {
+            step: {seq: seq_cache for seq, seq_cache in cache.items() if seq < self._seen_tokens}
+            for step, cache in self.key_cache.items()
+        }
+        self.value_cache = {
+            step: {seq: seq_cache for seq, seq_cache in cache.items() if seq < self._seen_tokens}
+            for step, cache in self.value_cache.items()
+        }
 
     def get_seq_length(self, step_idx: int = 0) -> int:
         return self._seen_tokens
@@ -393,7 +413,14 @@ class CausalSelfAttention(torch.nn.Module):
         if mask is not None:
             y: torch.Tensor = flex_attention(q, k, v, block_mask=mask)  # type: ignore
         else:
-            y = torch.nn.functional.scaled_dot_product_attention(q, k, v, dropout_p=0.0, is_causal=q.shape[2] > 1)
+            if q.shape[2] < k.shape[2]:
+                if q.shape[2] > 1:
+                    bias = attn_bias.causal_lower_right(q.shape[2], k.shape[2])
+                    y = torch.nn.functional.scaled_dot_product_attention(q, k, v, bias, dropout_p=0.0)
+                else:
+                    y = torch.nn.functional.scaled_dot_product_attention(q, k, v, dropout_p=0.0, is_causal=False)
+            else:
+                y = torch.nn.functional.scaled_dot_product_attention(q, k, v, dropout_p=0.0, is_causal=True)
         y = y.transpose(1, 2).reshape(B, S, E).contiguous()  # reshape is a view if possible (it mostly is)
         return self.proj(y)
 
@@ -532,6 +559,62 @@ class RavenForCausalLM(RavenPreTrainedModel, GenerationMixin):
             KV_LEN=kv_length,
             device=input_ids.device,
         )
+
+        # # Define mask_mod function
+        # def mask_mod(b, h, q_idx, kv_idx):
+        #     # Always apply causal constraint
+        #     is_causal = q_idx >= kv_idx
+
+        #     # Handle cache vs current tokens
+        #     is_cache = kv_idx < cache_len
+        #     current_idx = kv_idx - cache_len
+
+        #     # For cache: always valid; For current: check padding
+        #     not_pad = input_ids[b, current_idx] != pad_token_id
+        #     valid = is_cache | not_pad
+
+        #     # Apply attention mask if provided
+        #     if attention_mask is not None:
+        #         q_idx_curr = q_idx - cache_len
+        #         attn_valid = attention_mask[b, q_idx_curr, current_idx]
+        #         valid = valid & (is_cache | attn_valid)
+
+        #     return is_causal & valid
+
+        # def mask_mod(b, h, q_idx, kv_idx):
+        #     is_causal = q_idx >= kv_idx
+        #     is_current = (kv_idx >= cache_len) & (kv_idx < kv_length)
+        #     current_idx = kv_idx - cache_len
+
+        #     is_valid = (~is_current) | (
+        #         (current_idx >= 0) & (current_idx < seq_len) & (input_ids != pad_token_id)[b, current_idx % seq_len]
+        #     )
+
+        #     return is_causal & is_valid
+
+        # # Define mask_mod function
+        # def mask_mod(b, h, q_idx, kv_idx):
+        #     # Always apply causal constraint
+        #     is_causal = q_idx >= kv_idx
+
+        #     # Handle cache vs current tokens
+        #     is_cache = kv_idx < cache_len
+        #     current_idx = kv_idx - cache_len
+        #     in_bounds = (current_idx >= 0) & (current_idx < seq_len)
+
+        #     # For cache: always valid; For current: check padding
+        #     not_pad = (input_ids[b, current_idx % seq_len] != pad_token_id) | ~in_bounds
+        #     valid = is_cache | (not_pad & in_bounds)
+
+        #     # Apply attention mask if provided
+        #     if attention_mask is not None:
+        #         q_idx_curr = q_idx - cache_len
+        #         q_in_bounds = (q_idx_curr >= 0) & (q_idx_curr < seq_len)
+        #         attn_valid = attention_mask[b, q_idx_curr % seq_len, current_idx % seq_len] | ~(in_bounds & q_in_bounds)
+        #         valid = valid & (is_cache | attn_valid)
+
+        #     return is_causal & valid
+
         # Create block mask
         block_mask = create_block_mask(
             mask_mod,
@@ -563,7 +646,6 @@ class RavenForCausalLM(RavenPreTrainedModel, GenerationMixin):
         use_cache: bool = False,
         cache_position: Optional[torch.Tensor] = None,
         init_scale: float = 1.0,
-        force_flex_attn: bool = False,
         **kwargs,
     ) -> CausalLMOutputRecurrentLatents:
         # Support multiple position formats:
@@ -583,7 +665,7 @@ class RavenForCausalLM(RavenPreTrainedModel, GenerationMixin):
         if use_cache and past_key_values is None:
             past_key_values = HuginnDynamicCache()
 
-        prepared_attn_mask = self.compile_mask(input_ids, attention_mask, past_key_values) if force_flex_attn else None
+        prepared_attn_mask = None  # self.compile_mask(input_ids, attention_mask, past_key_values)
         block_idx = torch.tensor(-1, device=torch.device("cpu"), dtype=torch.long)  # count in tensors for compile
         # Non-recurrent prelude
         for block in self.transformer.prelude:  # type: ignore # types broken in 2.6+
@@ -891,11 +973,6 @@ class RavenForCausalLM(RavenPreTrainedModel, GenerationMixin):
         self.generation_config = args[1] if len(args) > 1 else self.generation_config
         if any(k in kwargs for k in ("criterion", "exit_threshold")):
             # print("Dispatching to custom generate_adaptive function call")
-        """Dispatcher - use HF generate in all normal cases.
-        If BOTH `criterion` AND `exit_threshold` are provided as not None, we use adaptive compute.
-        """
-        if kwargs.get("criterion", None) is not None and kwargs.get("exit_threshold", None) is not None:
-            print("Dispatching to custom generate function call")
             return self.generate_with_adaptive_compute(*args, **kwargs)
         elif "continuous_compute" in kwargs:
             # print("Dispatching to custom generate_minimal function call")
@@ -904,18 +981,13 @@ class RavenForCausalLM(RavenPreTrainedModel, GenerationMixin):
             return super().generate(*args, **kwargs)
 
     @torch.no_grad()
-    def generate_minimal(
+    def _prep_generate_args(
         self,
-        input_ids: torch.LongTensor,
+        input_ids: torch.Tensor,
         generation_config: Optional[GenerationConfig] = None,  # type: ignore
-        tokenizer=None,
-        streamer=None,
-        continuous_compute=False,  # warm-start state / continuous CoT
-        init_scale: float = 1.0,
         cache_lookup_strategy: str = "full",
-        **model_kwargs,
-    ) -> Union[torch.Tensor, dict[str, Any]]:
-        """Minimal single-sequence generation. Template for more complicated generate tasks"""
+        model_kwargs: dict = {},
+    ):
         # Setup
         if generation_config is None:
             generation_config: GenerationConfig = self.generation_config  # type: ignore
@@ -942,7 +1014,24 @@ class RavenForCausalLM(RavenPreTrainedModel, GenerationMixin):
             )
         model_kwargs["use_cache"] = True
         model_kwargs = self._get_initial_cache_position(input_ids, model_kwargs)
-        pad_id = torch.as_tensor(65509, device=input_ids.device)
+        return model_kwargs, generation_config, max_new_tokens
+
+    @torch.no_grad()
+    def generate_minimal(
+        self,
+        input_ids: torch.Tensor,
+        generation_config: Optional[GenerationConfig] = None,  # type: ignore
+        tokenizer=None,
+        streamer=None,
+        continuous_compute=False,  # warm-start state / continuous CoT
+        init_scale: float = 1.0,
+        cache_lookup_strategy: str = "full",
+        **model_kwargs,
+    ) -> Union[torch.Tensor, dict[str, Any]]:
+        """Minimal single-sequence generation. Template for more complicated generate tasks"""
+        model_kwargs, generation_config, max_new_tokens = self._prep_generate_args(
+            input_ids, generation_config, cache_lookup_strategy
+        )
         stop_tokens = self._get_stops(generation_config, tokenizer, model_kwargs).to(input_ids.device)
         unfinished_sequences = torch.ones(input_ids.shape[0], dtype=torch.long, device=input_ids.device)
 
@@ -959,20 +1048,11 @@ class RavenForCausalLM(RavenPreTrainedModel, GenerationMixin):
             outputs = self(**model_inputs, init_scale=init_scale)
 
             # Get next token
-            next_token_logits = outputs.logits[:, -1, :].to(copy=True, dtype=torch.float32, device=input_ids.device)  # type: ignore
-            if generation_config.do_sample:
-                next_token = self._sample_next_token(
-                    next_token_logits,
-                    generation_config.temperature,
-                    generation_config.top_k,
-                    generation_config.top_p,
-                    generation_config.min_p,
-                )
-            else:
-                next_token = torch.argmax(next_token_logits, dim=-1, keepdim=True)
+            next_token_logits = outputs.logits[:, -1, :].to(copy=True, dtype=torch.float32, device=input_ids.device)
+            next_token = self._sample_next_token(next_token_logits, generation_config)
 
             # Append token to sequence
-            input_ids = torch.cat([input_ids, next_token], dim=-1)  # type: ignore
+            input_ids = torch.cat([input_ids, next_token], dim=-1)
 
             if streamer:
                 streamer.put(next_token.cpu())
@@ -986,7 +1066,6 @@ class RavenForCausalLM(RavenPreTrainedModel, GenerationMixin):
                 for i in range(batch_size):
                     if unfinished_sequences[i] and next_token[i, 0].item() in stop_tokens:
                         unfinished_sequences[i] = 0
-            next_token = next_token * unfinished_sequences[:, None] + pad_id * (1 - unfinished_sequences[:, None])
             if "stopping_criteria" in model_kwargs:
                 unfinished_sequences = unfinished_sequences & ~model_kwargs["stopping_criteria"](input_ids, None)
             if unfinished_sequences.max() == 0:
@@ -997,7 +1076,7 @@ class RavenForCausalLM(RavenPreTrainedModel, GenerationMixin):
 
         if generation_config.return_dict_in_generate:
             return GenerateDecoderOnlyOutput(
-                sequences=input_ids,
+                sequences=input_ids,  # type: ignore
                 scores=None,
                 logits=None,
                 attentions=None,
@@ -1009,7 +1088,7 @@ class RavenForCausalLM(RavenPreTrainedModel, GenerationMixin):
     @torch.no_grad()
     def generate_with_adaptive_compute(
         self,
-        input_ids: torch.LongTensor,
+        input_ids: torch.Tensor,
         generation_config: Optional[GenerationConfig] = None,  # type: ignore
         tokenizer=None,
         streamer=None,
@@ -1024,39 +1103,12 @@ class RavenForCausalLM(RavenPreTrainedModel, GenerationMixin):
         Generate tokens with adaptive compute. This is NOT the most efficient implementation.
         For batches, on each token, we iterate until the entire batch finishes.
         """
-        # Setup
-        if generation_config is None:
-            generation_config: GenerationConfig = self.generation_config  # type: ignore
-        if "max_new_tokens" in model_kwargs:
-            max_new_tokens = model_kwargs["max_new_tokens"]
-            if "max_length" in model_kwargs:
-                max_new_tokens = min(max_new_tokens, model_kwargs["max_length"] - input_ids.shape[1])
-        else:
-            max_length = model_kwargs.get("max_length", generation_config.max_length)
-            max_new_tokens = max_length - input_ids.shape[1]
-
+        model_kwargs, generation_config, max_new_tokens = self._prep_generate_args(
+            input_ids, generation_config, cache_lookup_strategy, model_kwargs
+        )
         max_steps = model_kwargs.get("num_steps", self.config.mean_recurrence)
-
-        if "cache_implementation" not in model_kwargs or model_kwargs["cache_implementation"] == "dynamic":
-            model_kwargs["past_key_values"] = HuginnDynamicCache(lookup_strategy=cache_lookup_strategy)
-        else:
-            model_kwargs["past_key_values"] = HuginnStaticCache(
-                max_length=max_length,
-                max_num_steps=4 + model_kwargs.get("num_steps", self.config.mean_recurrence) * 4,
-                num_heads=self.config.num_key_value_heads,
-                hidden_dim=self.config.n_embd // self.config.num_attention_heads,
-                batch_size=input_ids.shape[0],
-                dtype=torch.bfloat16,
-                device=input_ids.device,
-                lookup_strategy=cache_lookup_strategy,
-            )
-
-        model_kwargs["use_cache"] = True
-        model_kwargs = self._get_initial_cache_position(input_ids, model_kwargs)
-        pad_id = torch.as_tensor(65509, device=input_ids.device)
         stop_tokens = self._get_stops(generation_config, tokenizer, model_kwargs).to(input_ids.device)
         logit_type = dict(copy=True, dtype=torch.float32, device=input_ids.device)
-
         batch_size = input_ids.shape[0]
         compute_steps = []
 
@@ -1069,7 +1121,7 @@ class RavenForCausalLM(RavenPreTrainedModel, GenerationMixin):
         unfinished_sequences = torch.ones(batch_size, dtype=torch.long, device=input_ids.device)
 
         # Generate tokens
-        for sequence_step in range(max_new_tokens):
+        for _ in range(max_new_tokens):
             # Adaptive compute forward
             model_inputs = self.prepare_inputs_for_generation(input_ids, **model_kwargs)
             aux_inputs = {
@@ -1122,7 +1174,7 @@ class RavenForCausalLM(RavenPreTrainedModel, GenerationMixin):
                     current_step=compute_step,
                 )
 
-                if sequence_step > 0:  # do not exit in prefill
+                if _ > 0:  # do not exit in prefill
                     # Check exit condition for each sequence in batch
                     if criterion == "entropy-diff":
                         prev_entropy = entropy
@@ -1215,19 +1267,10 @@ class RavenForCausalLM(RavenPreTrainedModel, GenerationMixin):
             compute_steps.append([compute_steps_per_seq, exit_values_per_seq])
 
             # Sample or select next token based on generation config
-            if generation_config.do_sample:
-                next_token = self._sample_next_token(
-                    next_token_logits,
-                    generation_config.temperature,
-                    generation_config.top_k,
-                    generation_config.top_p,
-                    generation_config.min_p,
-                )
-            else:
-                next_token = torch.argmax(next_token_logits, dim=-1, keepdim=True)  # type: ignore
+            next_token = self._sample_next_token(next_token_logits, generation_config)
 
             # Append token to sequence
-            input_ids = torch.cat([input_ids, next_token], dim=-1)  # type: ignore
+            input_ids = torch.cat([input_ids, next_token], dim=-1)
 
             if streamer:
                 streamer.put(next_token.cpu())
@@ -1244,9 +1287,6 @@ class RavenForCausalLM(RavenPreTrainedModel, GenerationMixin):
                 ):
                     unfinished_sequences[i] = 0
 
-            # Apply padding for finished sequences
-            next_token = next_token * unfinished_sequences[:, None] + pad_id * (1 - unfinished_sequences[:, None])
-
             # Apply any custom stopping criteria
             if "stopping_criteria" in model_kwargs:
                 unfinished_sequences = unfinished_sequences & ~model_kwargs["stopping_criteria"](input_ids, None)
@@ -1260,7 +1300,7 @@ class RavenForCausalLM(RavenPreTrainedModel, GenerationMixin):
 
         if generation_config.return_dict_in_generate:
             return GenerateDecoderOnlyOutput(
-                sequences=input_ids,
+                sequences=input_ids,  # type: ignore
                 scores=compute_steps,  # type: ignore
                 logits=None,
                 attentions=None,
@@ -1281,47 +1321,230 @@ class RavenForCausalLM(RavenPreTrainedModel, GenerationMixin):
                 stop_tokens.add(token_id)
         return torch.tensor(list(stop_tokens))
 
-    def _sample_next_token(self, next_token_logits, temperature=None, top_k=None, top_p=None, min_p=None):
+    def _sample_next_token(self, next_token_logits, generation_config):
         """Helper function to sample the next token."""
-        if temperature:
-            next_token_logits = next_token_logits.float() / temperature
+        if generation_config.do_sample:
+            if generation_config.temperature:
+                next_token_logits = next_token_logits.float() / generation_config.temperature
 
-        probs = F.softmax(next_token_logits, dim=-1)
+            probs = F.softmax(next_token_logits, dim=-1)
 
-        # Apply top_k
-        if top_k:
-            top_k_values, _ = torch.topk(probs, top_k, dim=-1)
-            min_values = top_k_values[:, -1].unsqueeze(-1).expand_as(probs)
-            probs = torch.where(probs < min_values, torch.zeros_like(probs), probs)
+            # Apply top_k
+            if generation_config.top_k:
+                top_k_values, _ = torch.topk(probs, generation_config.top_k, dim=-1)
+                min_values = top_k_values[:, -1].unsqueeze(-1).expand_as(probs)
+                probs = torch.where(probs < min_values, torch.zeros_like(probs), probs)
 
-        # Apply top_p (nucleus sampling)
-        if top_p:
-            sorted_probs, sorted_indices = torch.sort(probs, descending=True, dim=-1)
-            cumulative_probs = torch.cumsum(sorted_probs, dim=-1)
+            # Apply top_p (nucleus sampling)
+            if generation_config.top_p:
+                sorted_probs, sorted_indices = torch.sort(probs, descending=True, dim=-1)
+                cumulative_probs = torch.cumsum(sorted_probs, dim=-1)
 
-            # Create mask for probs to keep
-            remove_indices = cumulative_probs > top_p
-            remove_indices[:, 0] = False  # Keep at least the top probability
+                # Create mask for probs to keep
+                remove_indices = cumulative_probs > generation_config.top_p
+                remove_indices[:, 0] = False  # Keep at least the top probability
 
-            # Convert sorted indices mask back to original indices mask
-            mask = torch.zeros_like(probs, dtype=torch.bool)
-            for i in range(probs.shape[0]):
-                mask[i, sorted_indices[i, remove_indices[i]]] = True
+                # Convert sorted indices mask back to original indices mask
+                mask = torch.zeros_like(probs, dtype=torch.bool)
+                for i in range(probs.shape[0]):
+                    mask[i, sorted_indices[i, remove_indices[i]]] = True
 
-            probs = torch.where(mask, torch.zeros_like(probs), probs)
+                probs = torch.where(mask, torch.zeros_like(probs), probs)
 
-        # Apply min_p
-        if min_p:
-            max_probs = probs.max(dim=-1, keepdim=True)[0]
-            min_p_threshold = min_p * max_probs
-            probs = torch.where(probs < min_p_threshold, torch.zeros_like(probs), probs)
+            # Apply min_p
+            if generation_config.min_p:
+                max_probs = probs.max(dim=-1, keepdim=True)[0]
+                min_p_threshold = generation_config.min_p * max_probs
+                probs = torch.where(probs < min_p_threshold, torch.zeros_like(probs), probs)
 
-        # Renormalize probabilities
-        probs = probs / probs.sum(dim=-1, keepdim=True).clamp(min=1e-10)
+            # Renormalize probabilities
+            probs = probs / probs.sum(dim=-1, keepdim=True).clamp(min=1e-10)
 
-        # Sample from the distribution
-        next_token = torch.multinomial(probs, num_samples=1)
-        return next_token
+            # Sample from the distribution
+            return torch.multinomial(probs, num_samples=1)
+        else:
+            return torch.argmax(next_token_logits, dim=-1, keepdim=True)
+
+    @torch.no_grad()
+    def generate_speculative(
+        self,
+        input_ids: torch.Tensor,
+        generation_config: Optional[GenerationConfig] = None,  # type: ignore
+        tokenizer=None,
+        streamer=None,
+        continuous_compute=False,  # warm-start state / continuous CoT
+        init_scale: float = 1.0,
+        cache_lookup_strategy: str = "full",
+        draft_steps=32,
+        lookahead_for_draft=8,
+        verification_threshold=1,
+        num_steps: int = 32,  # intercept deliberately
+        **model_kwargs,
+    ) -> Union[torch.Tensor, dict[str, Any]]:
+        """Batched speculative decoding with per-sequence acceptance."""
+        assert lookahead_for_draft > 0
+        pad_id = 65509
+        model_kwargs, generation_config, max_new_tokens = self._prep_generate_args(
+            input_ids, generation_config, cache_lookup_strategy, model_kwargs
+        )
+        stop_tokens = self._get_stops(generation_config, tokenizer, model_kwargs).to(input_ids.device)
+        unfinished_sequences = torch.ones(input_ids.shape[0], dtype=torch.long, device=input_ids.device)
+
+        # Set up continuous compute if enabled
+        if continuous_compute:
+            embedded_inputs, _ = self.embed_inputs(input_ids)
+            model_kwargs["input_states"] = self.initialize_state(embedded_inputs, scale=init_scale)
+
+        tokens_generated = 0
+        # Prefill cache with full num_steps
+        if model_kwargs["past_key_values"].get_seq_length() == 0:
+            model_inputs = self.prepare_inputs_for_generation(input_ids, **model_kwargs)
+            outputs = self(**model_inputs, num_steps=num_steps, init_scale=init_scale)
+            next_token = self._sample_next_token(
+                outputs.logits[:, -1, :].to(copy=True, dtype=torch.float32), generation_config
+            )
+            input_ids = torch.cat([input_ids, next_token], dim=-1)
+            tokens_generated += 1
+            if streamer:
+                streamer.put(next_token.cpu())
+            model_kwargs["cache_position"] = torch.as_tensor(
+                [model_inputs["past_key_values"].get_seq_length()], device=input_ids.device
+            )
+            if continuous_compute:
+                model_kwargs["input_states"] = outputs.latent_states[:, -1:, :]
+
+        # Generate tokens
+        batch_size, prefix_seq_len = input_ids.shape[0], input_ids.shape[1]
+        accepted_tokens = []
+
+        while tokens_generated < max_new_tokens:
+            ### Run the next draft ####
+            drafted_inputs = input_ids.clone()
+            current_len = input_ids.shape[1]
+
+            for _ in range(lookahead_for_draft):
+                model_inputs = self.prepare_inputs_for_generation(drafted_inputs, **model_kwargs)
+                outputs = self(**model_inputs, num_steps=draft_steps, init_scale=init_scale)
+                next_token_logits = outputs.logits[:, -1, :].to(copy=True, dtype=torch.float32)
+                next_token = self._sample_next_token(next_token_logits, generation_config)
+                drafted_inputs = torch.cat([drafted_inputs, next_token], dim=-1)
+                model_kwargs["cache_position"] = model_kwargs["cache_position"][-1:] + 1
+                if continuous_compute:
+                    model_kwargs["input_states"] = outputs.latent_states[:, -1:, :]
+
+            model_kwargs["past_key_values"].clear_last_k_entries(lookahead_for_draft)
+
+            ## Verify drafted tokens ###
+            model_kwargs["cache_position"] = torch.arange(
+                current_len - 1, current_len + lookahead_for_draft - 1, device=input_ids.device
+            )
+            model_inputs = self.prepare_inputs_for_generation(drafted_inputs, **model_kwargs)
+            outputs = self(**model_inputs, num_steps=num_steps, init_scale=init_scale)
+            verified_next_token_preds = outputs.logits.argmax(dim=-1)
+
+            if verification_threshold >= 1:
+                mismatched_tokens = (
+                    verified_next_token_preds[:, -lookahead_for_draft:] != drafted_inputs[:, current_len:]
+                )
+                not_all_matched, first_mismatch = torch.max(mismatched_tokens, dim=1)
+            else:
+                verified_logits = outputs.logits[:, -lookahead_for_draft:, :]
+                verified_probs = F.softmax(verified_logits, dim=-1)
+                drafted_token_probs = torch.gather(
+                    verified_probs, -1, drafted_inputs[:, current_len:].unsqueeze(-1)
+                ).squeeze(-1)
+                max_probs = verified_probs.max(dim=-1)[0]
+                verification_passed = drafted_token_probs >= verification_threshold * max_probs
+                not_all_matched, first_mismatch = torch.max(~verification_passed, dim=1)
+
+            # Per-sequence acceptance handling
+            acceptance_lengths = torch.where(not_all_matched, first_mismatch, lookahead_for_draft)
+
+            # Build next_tokens for each sequence
+            next_tokens_batch = []
+            for i in range(batch_size):
+                seq_acceptance = acceptance_lengths[i].item()
+                if not_all_matched[i] and seq_acceptance < lookahead_for_draft:
+                    # Accept up to mismatch + sample final token
+                    accepted_part = drafted_inputs[i : i + 1, current_len : current_len + seq_acceptance]
+                    final_token_logits = outputs.logits[i : i + 1, seq_acceptance, :].to(copy=True, dtype=torch.float32)
+                    final_token = self._sample_next_token(final_token_logits, generation_config)
+                    seq_tokens = torch.cat([accepted_part, final_token], dim=-1) if seq_acceptance > 0 else final_token
+                else:
+                    # Accept all drafted tokens
+                    seq_tokens = drafted_inputs[i : i + 1, current_len : current_len + seq_acceptance]
+                next_tokens_batch.append(seq_tokens)
+
+            # Clean up KV cache - only if any sequence had mismatches
+            if not_all_matched.any():
+                min_first_mismatch = first_mismatch.min().item()
+                model_inputs["past_key_values"].clear_last_k_entries(lookahead_for_draft - min_first_mismatch - 1)
+
+            # Concatenate accepted tokens to input_ids
+            batch_accepted_counts = [tokens.shape[1] for tokens in next_tokens_batch]
+            max_len = max(batch_accepted_counts)
+            padded_tokens = [
+                torch.cat(
+                    [
+                        tokens,
+                        pad_id * torch.ones((1, max_len - tokens.shape[1]), dtype=tokens.dtype, device=tokens.device),
+                    ],
+                    dim=-1,
+                )
+                if tokens.shape[1] < max_len
+                else tokens
+                for tokens in next_tokens_batch
+            ]
+            next_tokens = torch.cat(padded_tokens, dim=0)
+            input_ids = torch.cat([input_ids, next_tokens], dim=-1)
+
+            accepted_tokens.append(batch_accepted_counts)
+            tokens_generated += max(batch_accepted_counts)
+
+            if streamer:
+                streamer.put(next_tokens_batch[0].cpu())
+
+            model_kwargs["cache_position"] = torch.as_tensor(
+                [model_inputs["past_key_values"].get_seq_length()], device=input_ids.device
+            )
+            if continuous_compute:
+                model_kwargs["input_states"] = outputs.latent_states[:, -1:, :]
+
+            # Check stopping conditions
+            if stop_tokens is not None:
+                for i in range(batch_size):
+                    if unfinished_sequences[i] and torch.isin(next_tokens_batch[i], stop_tokens).any():
+                        unfinished_sequences[i] = 0
+            if "stopping_criteria" in model_kwargs:
+                unfinished_sequences = unfinished_sequences & ~model_kwargs["stopping_criteria"](input_ids, None)
+            if unfinished_sequences.max() == 0:
+                break
+
+        if streamer:
+            streamer.end()
+
+        # Cut off extraneous parts of the sequence per batch element
+        if stop_tokens is not None:
+            for i in range(batch_size):
+                stop_positions = torch.isin(input_ids[i, prefix_seq_len:], stop_tokens).nonzero()
+                if len(stop_positions) > 0:
+                    input_ids[i, prefix_seq_len + stop_positions[0].item() + 1 :] = pad_id
+        # Trim tensor to remove columns that are pad_id across all sequences
+        non_pad_mask = input_ids != pad_id
+        last_real_token = non_pad_mask.any(dim=0).nonzero()
+        if len(last_real_token) > 0:
+            input_ids = input_ids[:, : last_real_token[-1].item() + 1]
+
+        if generation_config.return_dict_in_generate:
+            return GenerateDecoderOnlyOutput(
+                sequences=input_ids,  # type: ignore
+                scores=accepted_tokens,  # type: ignore
+                logits=None,
+                attentions=None,
+                hidden_states=None,
+                past_key_values=model_kwargs.get("past_key_values"),
+            )
+        return input_ids
 
     def get_stats(self, logits, x, latent_states, xk, input_embeds, num_steps_no_grad, num_steps_with_grad):
         probs = torch.softmax(logits.float(), dim=-1)
