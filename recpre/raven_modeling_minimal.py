@@ -7,7 +7,7 @@ from torch import Tensor
 from torch.nn.attention.flex_attention import create_block_mask, BlockMask, flex_attention
 from torch.nn.attention import bias as attn_bias
 from dataclasses import dataclass
-from typing import Union, Optional, Any
+from typing import Union, Optional, Any, Tuple, Callable
 
 
 from .raven_config_minimal import RavenConfig
@@ -466,6 +466,19 @@ class SandwichBlock(torch.nn.Module):
         x = self.norm_2(attn_out + x)
         x = self.norm_4(self.mlp(self.norm_3(x)) + x)
         return x
+
+
+class PerLoopExitEvaluator:
+    # returns exit_reached, logits (when computed), and exit_values
+    def evaluate_exit(self, latents: torch.Tensor) -> Tuple[torch.Tensor, Optional[torch.Tensor], torch.Tensor]:
+        raise NotImplementedError("Not implemented")
+
+    def init(self, initial_latent: torch.Tensor, aux_inputs: dict):
+        raise NotImplementedError("Not implemented")
+
+class PredeterminedExitEvaluator:
+    def calculate_num_steps(self) -> int:
+        raise NotImplementedError("Not implemented")
 
 
 class RavenForCausalLM(RavenPreTrainedModel, GenerationMixin):
@@ -1093,6 +1106,7 @@ class RavenForCausalLM(RavenPreTrainedModel, GenerationMixin):
         continuous_compute=False,  # warm-start state / continuous CoT
         criterion="none",  # off by default, turn on by choosing an exit criterion
         exit_threshold: Union[str, float, int] = "auto",
+        exit_evaluator: Optional[PerLoopExitEvaluator | PredeterminedExitEvaluator] = None,
         init_scale: float = 1.0,
         cache_lookup_strategy: str = "full",
         **model_kwargs,
@@ -1118,6 +1132,9 @@ class RavenForCausalLM(RavenPreTrainedModel, GenerationMixin):
         # Track which sequences have finished (using unfinished_sequences to match generate_minimal)
         unfinished_sequences = torch.ones(batch_size, dtype=torch.long, device=input_ids.device)
 
+        if exit_evaluator is None:
+            exit_evaluator = get_adaptive_exit_evaluator(self, criterion, exit_threshold)
+
         # Generate tokens
         for _ in range(max_new_tokens):
             # Adaptive compute forward
@@ -1137,33 +1154,18 @@ class RavenForCausalLM(RavenPreTrainedModel, GenerationMixin):
             compute_steps_per_seq = [0] * batch_size
             exit_reached = torch.zeros(batch_size, dtype=torch.bool, device=input_ids.device)
 
-            # Set up criterions based on selected strategy
-            if criterion == "entropy-diff":
-                entropy = torch.ones(batch_size, device=input_ids.device) * 100.0
-                exit_threshold = 1e-3 if exit_threshold == "auto" else float(exit_threshold)
-            elif criterion == "latent-diff":
-                exit_threshold = 0.03 if exit_threshold == "auto" else float(exit_threshold)
-            elif "kl" in criterion:
-                V = self.config.padded_vocab_size
-                log_probs = ((1 / V) * torch.ones(batch_size, V, dtype=torch.float, device=input_ids.device)).log()
-                if criterion == "minp-kl":
-                    exit_threshold = 1e-6 if exit_threshold == "auto" else float(exit_threshold)
-                else:
-                    exit_threshold = 5e-4 if exit_threshold == "auto" else float(exit_threshold)
-            elif criterion == "argmax-stability":
-                stable_for_n_steps = torch.zeros(batch_size, dtype=torch.long, device=input_ids.device)
-                current_argmax = torch.ones(batch_size, dtype=torch.long, device=input_ids.device) * -1
-                exit_threshold = 5 if exit_threshold == "auto" else int(exit_threshold)
-            elif criterion == "none":
-                exit_threshold = 1.0 if exit_threshold == "auto" else float(exit_threshold)
-            else:
-                raise ValueError("Invalid adaptive compute strategy.")
-
             next_token_logits = None
 
+            if isinstance(exit_evaluator, PerLoopExitEvaluator):
+                exit_evaluator.init(current_latents, aux_inputs)
+                num_steps = max_steps
+            elif isinstance(exit_evaluator, PredeterminedExitEvaluator):
+                num_steps = exit_evaluator.calculate_num_steps()
+            else:
+                raise ValueError(f"Invalid exit evaluator: {exit_evaluator}")
+
             # Iterate through compute steps
-            for compute_step in range(max_steps):
-                prev_latents = current_latents.clone()
+            for compute_step in range(num_steps):
                 current_latents, block_idx, _ = self.iterate_one_step(
                     embedded_inputs,
                     current_latents,
@@ -1172,61 +1174,22 @@ class RavenForCausalLM(RavenPreTrainedModel, GenerationMixin):
                     current_step=compute_step,
                 )
 
-                if _ > 0:  # do not exit in prefill
-                    # Check exit condition for each sequence in batch
-                    if criterion == "entropy-diff":
-                        prev_entropy = entropy
-                        outputs = self.predict_from_latents(current_latents, **aux_inputs)
-                        logits: torch.Tensor = outputs.logits  # type: ignore
-                        probs = F.softmax(logits[:, -1, :], dim=-1)
-                        entropy = -torch.sum(probs * torch.log(probs + 1e-10), dim=-1)
-                        exit_values = (entropy - prev_entropy).abs()
-                    elif criterion == "latent-diff":
-                        norm_diff = (prev_latents - current_latents).norm(dim=-1) / current_latents.norm(dim=-1)
-                        exit_values = norm_diff.mean(dim=-1)
-                    elif "kl" in criterion:
-                        outputs = self.predict_from_latents(current_latents, **aux_inputs)
-                        logits: torch.Tensor = outputs.logits  # type: ignore
-                        prev_log_probs = log_probs
-                        if criterion == "minp-kl":
-                            probs = F.softmax(logits[:, -1, :].float(), dim=-1)
-                            max_probs = probs.max(dim=-1, keepdim=True)[0]
-                            probs_mask = probs < (0.1 * max_probs)
-                            masked_probs = probs.clone()
-                            masked_probs[probs_mask] = 1 / V
-                            probs = masked_probs / masked_probs.sum(dim=-1, keepdim=True)
-                            log_probs = probs.log()
-                        else:
-                            log_probs = F.log_softmax(logits[:, -1, :].float(), dim=-1)
-                        exit_values = F.kl_div(log_probs, prev_log_probs, reduction="none", log_target=True).sum(dim=-1)
-                    elif criterion == "argmax-stability":
-                        prev_argmax = current_argmax
-                        outputs = self.predict_from_latents(current_latents, **aux_inputs)
-                        logits: torch.Tensor = outputs.logits  # type: ignore
-                        current_argmax = logits[:, -1, :].argmax(dim=-1)
-                        stable_for_n_steps = torch.where(
-                            current_argmax == prev_argmax, stable_for_n_steps + 1, torch.zeros_like(stable_for_n_steps)
-                        )
-                        exit_values = stable_for_n_steps
-                    elif criterion == "none":
-                        exit_values = torch.ones(batch_size, device=input_ids.device) * 2.0 * exit_threshold
+                # Check for new exits, respecting unfinished_sequences
+                if isinstance(exit_evaluator, PerLoopExitEvaluator):
+                    new_exits, optional_logits, exit_values = exit_evaluator.evaluate_exit(current_latents)
 
                     # Record values and check exits for each sequence
                     for i in range(batch_size):
                         if not exit_reached[i] and unfinished_sequences[i].bool():
                             exit_values_per_seq[i].append(exit_values[i].item())
 
-                    # Check for new exits, respecting unfinished_sequences
-                    new_exits = (
-                        exit_values < exit_threshold
-                        if criterion != "argmax-stability"
-                        else exit_values >= exit_threshold
-                    )
                     new_exits = new_exits & ~exit_reached & unfinished_sequences.bool()
 
                     if new_exits.any():
                         exit_reached = exit_reached | new_exits
-                        if criterion == "latent-diff":
+                        if optional_logits is not None:
+                            logits = optional_logits
+                        else:
                             # Normally we don't compute the output for latent-diff, but when there is an exit,
                             # we need to compute and save the output
                             outputs = self.predict_from_latents(current_latents, **aux_inputs)
@@ -1234,9 +1197,8 @@ class RavenForCausalLM(RavenPreTrainedModel, GenerationMixin):
                         if next_token_logits is None:
                             next_token_logits = logits[:, -1, :].to(**logit_type)  # type: ignore
                         else:
-                            for i in range(batch_size):
-                                if new_exits[i]:
-                                    next_token_logits[i] = logits[i, -1, :].to(**logit_type)  # type: ignore
+                            next_token_logits[new_exits] = logits[new_exits, -1, :].to(**logit_type)  # type: ignore
+
                         for i in range(batch_size):
                             if new_exits[i]:
                                 compute_steps_per_seq[i] = compute_step + 1
@@ -1557,6 +1519,155 @@ class RavenForCausalLM(RavenPreTrainedModel, GenerationMixin):
             "num_steps_with_grad": num_steps_with_grad,
         }
         return stats
+
+
+#################################### Adaptive Compute ############################################################
+
+class NoOpExitEvaluator(PerLoopExitEvaluator):
+    def evaluate_exit(self, latents: torch.Tensor) -> Tuple[torch.Tensor, Optional[torch.Tensor], torch.Tensor]:
+        return torch.zeros(latents.shape[0], device=latents.device, dtype=torch.bool), None, torch.zeros(latents.shape[0], device=latents.device)
+
+
+class HeuristicExitEvaluator(PerLoopExitEvaluator):
+    def __init__(self, model: RavenForCausalLM, exit_threshold: float):
+        self.exit_threshold = exit_threshold
+        self.model = model
+
+    def evaluate_exit(self, latents: torch.Tensor) -> Tuple[torch.Tensor, Optional[torch.Tensor], torch.Tensor]:
+        raise NotImplementedError("Not implemented")
+
+
+class EntropyDiffExitEvaluator(HeuristicExitEvaluator):
+    def __init__(self, model: RavenForCausalLM, exit_threshold: float = 1e-3):
+        super().__init__(model, exit_threshold)
+
+    def init(self, initial_latent: torch.Tensor, aux_inputs: dict):
+        self.aux_inputs = aux_inputs
+        batch_size = initial_latent.shape[0]
+        self.prev_entropy = torch.ones(batch_size, device=initial_latent.device) * 100.0
+
+    def evaluate_exit(self, latents: torch.Tensor) -> Tuple[torch.Tensor, Optional[torch.Tensor], torch.Tensor]:
+        outputs = self.model.predict_from_latents(latents, **self.aux_inputs)
+        logits: torch.Tensor = outputs.logits  # type: ignore
+        probs = F.softmax(logits[:, -1, :], dim=-1)
+        entropy = -torch.sum(probs * torch.log(probs + 1e-10), dim=-1)
+        exit_values = (entropy - self.prev_entropy).abs()
+        self.prev_entropy = entropy
+        return exit_values < self.exit_threshold, logits, exit_values
+
+
+class LatentDiffExitEvaluator(HeuristicExitEvaluator):
+    def __init__(self, model: RavenForCausalLM, exit_threshold: float = 0.03):
+        super().__init__(model, exit_threshold)
+        self.prev_latents = None
+
+    def init(self, initial_latent: torch.Tensor, aux_inputs: dict):
+        self.aux_inputs = aux_inputs
+        self.prev_latents = initial_latent.clone()
+
+    def evaluate_exit(self, latents: torch.Tensor) -> Tuple[torch.Tensor, Optional[torch.Tensor], torch.Tensor]:
+        exit_values = (latents - self.prev_latents).norm(dim=-1) / latents.norm(dim=-1)
+        self.prev_latents = latents
+        return exit_values < self.exit_threshold, None, exit_values
+
+
+class KLExitEvaluator(HeuristicExitEvaluator):
+    def __init__(self, model: RavenForCausalLM, exit_threshold: float = 5e-4):
+        super().__init__(model, exit_threshold)
+        self.V = model.config.padded_vocab_size
+
+    def init(self, initial_latent: torch.Tensor, aux_inputs: dict):
+        self.aux_inputs = aux_inputs
+        batch_size = initial_latent.shape[0]
+        self.prev_log_probs = ((1 / self.V) * torch.ones(batch_size, self.V, device=initial_latent.device)).log()
+
+    def calc_log_probs(self, logits: torch.Tensor) -> torch.Tensor:
+        return F.log_softmax(logits[:, -1, :], dim=-1)
+
+    def evaluate_exit(self, latents: torch.Tensor) -> Tuple[torch.Tensor, Optional[torch.Tensor], torch.Tensor]:
+        outputs = self.model.predict_from_latents(latents[:, :, -1, :], **self.aux_inputs)
+        logits: torch.Tensor = outputs.logits  # type: ignore
+        log_probs = self.calc_log_probs(logits)
+
+        exit_values = F.kl_div(log_probs, self.prev_log_probs, reduction="none", log_target=True).sum(dim=-1)
+        self.prev_log_probs = log_probs
+        return exit_values < self.exit_threshold, logits, exit_values
+
+
+class MinKLExitEvaluator(KLExitEvaluator):
+    def __init__(self, model: RavenForCausalLM, exit_threshold: float = 1e-6):
+        super().__init__(model, exit_threshold)
+
+    def calc_log_probs(self, logits: torch.Tensor) -> torch.Tensor:
+        probs = F.softmax(logits[:, -1, :], dim=-1)
+        max_probs = probs.max(dim=-1, keepdim=True)[0]
+        probs_mask = probs < (0.1 * max_probs)
+        masked_probs = probs
+        masked_probs[probs_mask] = 1 / self.V
+        probs = masked_probs / masked_probs.sum(dim=-1, keepdim=True)
+        return probs.log()
+
+
+class ArgmaxStabilityExitEvaluator(HeuristicExitEvaluator):
+    def __init__(self, model: RavenForCausalLM, exit_threshold: float = 5):
+        super().__init__(model, exit_threshold)
+
+    def init(self, initial_latent: torch.Tensor, aux_inputs: dict):
+        self.aux_inputs = aux_inputs
+        batch_size = initial_latent.shape[0]
+        self.prev_argmax = torch.ones(batch_size, dtype=torch.long, device=initial_latent.device) * -1
+        self.stable_for_n_steps = torch.zeros(batch_size, dtype=torch.long, device=initial_latent.device)
+
+    def evaluate_exit(self, latents: torch.Tensor) -> Tuple[torch.Tensor, Optional[torch.Tensor], torch.Tensor]:
+        outputs = self.model.predict_from_latents(latents, **self.aux_inputs)
+        logits: torch.Tensor = outputs.logits  # type: ignore
+        current_argmax = logits[:, -1, :].argmax(dim=-1)
+        stable_for_n_steps = torch.where(
+            current_argmax == self.prev_argmax, self.stable_for_n_steps + 1, torch.zeros_like(self.stable_for_n_steps)
+        )
+        exit_values = stable_for_n_steps
+        self.prev_argmax = current_argmax
+        self.stable_for_n_steps = stable_for_n_steps
+        # for argmax-stability, we exit when the argmax is stable for n steps
+        return exit_values >= self.exit_threshold, logits, exit_values
+
+
+class NumStepsGenerator(PredeterminedExitEvaluator):
+    def __init__(self, num_steps_generator: Callable[[int], int]):
+        self.num_steps_generator: Callable[[int], int] = num_steps_generator
+        self.counter = 0
+
+    def calculate_num_steps(self) -> int:
+        steps = self.num_steps_generator(self.counter)
+        self.counter += 1
+        return steps
+
+
+def get_adaptive_exit_evaluator(model: RavenForCausalLM, criterion: str, exit_threshold: Union[str, float, int]) -> PerLoopExitEvaluator:
+    # Set up criterions based on selected strategy
+    if criterion == "entropy-diff":
+        exit_threshold = 1e-3 if exit_threshold == "auto" else float(exit_threshold)
+        exit_evaluator = EntropyDiffExitEvaluator(model, exit_threshold)
+    elif criterion == "latent-diff":
+        exit_threshold = 0.03 if exit_threshold == "auto" else float(exit_threshold)
+        exit_evaluator = LatentDiffExitEvaluator(model, exit_threshold)
+    elif "kl" in criterion:
+        if criterion == "minp-kl":
+            exit_threshold = 1e-6 if exit_threshold == "auto" else float(exit_threshold)
+            exit_evaluator = MinKLExitEvaluator(model, exit_threshold)
+        else:
+            exit_threshold = 5e-4 if exit_threshold == "auto" else float(exit_threshold)
+            exit_evaluator = KLExitEvaluator(model, exit_threshold)
+    elif criterion == "argmax-stability":
+        exit_threshold = 5 if exit_threshold == "auto" else int(exit_threshold)
+        exit_evaluator = ArgmaxStabilityExitEvaluator(model, exit_threshold)
+    elif criterion == "none":
+        exit_threshold = 1.0 if exit_threshold == "auto" else float(exit_threshold)
+        exit_evaluator = NoOpExitEvaluator()
+    else:
+        raise ValueError("Invalid adaptive compute strategy.")
+
+    return exit_evaluator
 
 
 #################################### Utils #######################################################################
