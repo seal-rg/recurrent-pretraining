@@ -7,7 +7,7 @@ from torch import Tensor
 from torch.nn.attention.flex_attention import create_block_mask, BlockMask, flex_attention
 from torch.nn.attention import bias as attn_bias
 from dataclasses import dataclass
-from typing import Union, Optional, Any, Tuple, Callable
+from typing import Set, Union, Optional, Any, Tuple, Callable, List
 
 
 from .raven_config_minimal import RavenConfig
@@ -468,6 +468,12 @@ class SandwichBlock(torch.nn.Module):
         return x
 
 
+PRINTED_OBJECTS: Set[Any] = set()
+def print_once(x: Any) -> None:
+    if x not in PRINTED_OBJECTS:
+        print(x)
+        PRINTED_OBJECTS.add(x)
+
 class PerLoopExitEvaluator:
     # returns exit_reached, logits (when computed), and exit_values
     def evaluate_exit(self, latents: torch.Tensor) -> Tuple[torch.Tensor, Optional[torch.Tensor], torch.Tensor]:
@@ -640,6 +646,107 @@ class RavenForCausalLM(RavenPreTrainedModel, GenerationMixin):
 
         return block_mask
 
+    @torch.no_grad()
+    def prefill_with_varied_exit_steps(
+        self,
+        input_ids: torch.Tensor,
+        exit_evaluator: PerLoopExitEvaluator | PredeterminedExitEvaluator,
+        past_key_values: Optional[ValidCache] = None,
+        init_scale: float = 1.0,
+        **kwargs,
+    ) -> Tuple[torch.Tensor, ValidCache, List[int]]:
+        # currently the cache doesn't support batching with adaptive compute
+        assert(input_ids.shape[0] == 1)
+
+        if past_key_values is None:
+            past_key_values = HuginnDynamicCache()
+        attention_mask = None
+        # output: torch.Tensor | None = None
+        output = torch.empty((input_ids.shape[0], 0, self.config.vocab_size), device=input_ids.device, dtype=torch.float)
+        compute_steps = []
+        for pos in range(input_ids.shape[1]):
+            aux_inputs = {
+                "cache_position": pos,
+                "past_key_values": past_key_values,
+                "attention_mask": attention_mask,
+            }
+            freqs_cis = self.freqs_cis[:, pos]
+            if isinstance(exit_evaluator, PredeterminedExitEvaluator):
+                num_steps = exit_evaluator.calculate_num_steps()
+            else:
+                num_steps = self.config.mean_recurrence
+
+            embedded_inputs, block_idx = self.embed_inputs(input_ids[:, pos].unsqueeze(1), **aux_inputs)
+
+            current_latents = self.initialize_state(embedded_inputs, scale=init_scale)
+            if isinstance(exit_evaluator, PerLoopExitEvaluator):
+                exit_evaluator.init(initial_latent=current_latents, aux_inputs=aux_inputs)
+
+            # Main recurrence
+            for compute_step in range(num_steps):
+                current_latents, block_idx, _ = self.iterate_one_step(
+                    embedded_inputs,
+                    current_latents,
+                    block_idx=block_idx,
+                    **aux_inputs,
+                    current_step=compute_step,
+                )
+
+                if isinstance(exit_evaluator, PerLoopExitEvaluator):
+                    new_exits, _, _ = exit_evaluator.evaluate_exit(current_latents)
+                    if new_exits.any():
+                        break
+            compute_steps.append(compute_step + 1)
+
+            x = self.transformer.ln_f(current_latents)
+
+            # Coda layers
+            block_idx = torch.tensor(0, device=torch.device("cpu"), dtype=torch.long)  # use negative indices for head
+            for block in self.transformer.coda:  # type: ignore # types broken in 2.6+
+                block_idx -= 1
+                x = block(x, freqs_cis, block_idx, attention_mask, past_key_values)
+
+            x = self.transformer.ln_f(x)
+            logits = self.lm_head(x).float()
+            output = torch.cat([output, logits], dim=1)
+        return output, past_key_values, compute_steps # type: ignore
+
+
+    @torch.no_grad()
+    def forward_with_adaptive_compute(
+        self,
+        input_ids: torch.Tensor,
+        exit_evaluator: PerLoopExitEvaluator | PredeterminedExitEvaluator,
+        labels: Optional[torch.Tensor] = None,
+        past_key_values: Optional[ValidCache] = None,
+        output_details: dict = {
+            "return_logits": True,
+            "return_latents": True,
+            "return_head": False,
+            "return_stats": False,
+        },
+        init_scale: float = 1.0,
+        **kwargs,
+    ) -> CausalLMOutputRecurrentLatents:
+        logits, past_key_values, compute_steps = self.prefill_with_varied_exit_steps(input_ids, exit_evaluator, past_key_values, init_scale)
+        if labels is not None:
+            loss = torch.nn.functional.cross_entropy(logits.view(-1, logits.shape[-1]), labels.view(-1))
+            log_ppl = loss.clone().detach()
+        else:
+            loss, log_ppl = torch.as_tensor(0.0), torch.as_tensor(0.0)
+
+        return CausalLMOutputRecurrentLatents(
+            loss=loss,
+            log_ppl=log_ppl,
+            logits=logits if output_details["return_logits"] else None,
+            past_key_values=None,
+            hidden_states=None,
+            latent_states=None,
+            attention_maps=None,
+            stats={"compute_steps": compute_steps},
+        )
+
+
     def forward(
         self,
         input_ids: torch.Tensor,
@@ -649,6 +756,7 @@ class RavenForCausalLM(RavenPreTrainedModel, GenerationMixin):
         position_ids: Optional[torch.Tensor] = None,
         labels: Optional[torch.Tensor] = None,
         num_steps: Optional[torch.Tensor] = None,
+        exit_evaluator: Optional[PerLoopExitEvaluator | PredeterminedExitEvaluator] = None,
         past_key_values: Optional[ValidCache] = None,
         output_details: dict = {
             "return_logits": True,
@@ -661,6 +769,8 @@ class RavenForCausalLM(RavenPreTrainedModel, GenerationMixin):
         init_scale: float = 1.0,
         **kwargs,
     ) -> CausalLMOutputRecurrentLatents:
+        if exit_evaluator is not None:
+            return self.forward_with_adaptive_compute(input_ids, exit_evaluator, labels, past_key_values, output_details, init_scale)
         # Support multiple position formats:
         if position_ids is None and cache_position is None:
             freqs_cis = self.freqs_cis[:, : input_ids.shape[1]]
@@ -985,8 +1095,10 @@ class RavenForCausalLM(RavenPreTrainedModel, GenerationMixin):
         """Dispatcher - use HF generate in all normal cases."""
         self.generation_config = args[1] if len(args) > 1 else self.generation_config
         if any(k in kwargs for k in ("criterion", "exit_threshold")):
+            print_once("Dispatching to custom generate_adaptive function call")
             return self.generate_with_adaptive_compute(*args, **kwargs)
         elif "continuous_compute" in kwargs:
+            print_once("Dispatching to custom generate_minimal function call")
             return self.generate_minimal(*args, **kwargs)
         else:
             return super().generate(*args, **kwargs)
@@ -1115,6 +1227,13 @@ class RavenForCausalLM(RavenPreTrainedModel, GenerationMixin):
         Generate tokens with adaptive compute. This is NOT the most efficient implementation.
         For batches, on each token, we iterate until the entire batch finishes.
         """
+        if input_ids.shape[0] > 1:
+            print_once(
+"""
+WARNING: adaptive compute with batch size > 1 is experimental, and will yield INACCURATE results. Do not use for benchmarking!
+This is due to even if a token early exits, we still iterate the entire batch, populating the KV cache more than normally with batch size 1.
+"""
+            )
         model_kwargs, generation_config, max_new_tokens = self._prep_generate_args(
             input_ids, generation_config, cache_lookup_strategy, model_kwargs
         )
@@ -1563,11 +1682,11 @@ class LatentDiffExitEvaluator(HeuristicExitEvaluator):
 
     def init(self, initial_latent: torch.Tensor, aux_inputs: dict):
         self.aux_inputs = aux_inputs
-        self.prev_latents = initial_latent.clone()
+        self.prev_latents = initial_latent.clone().detach()
 
     def evaluate_exit(self, latents: torch.Tensor) -> Tuple[torch.Tensor, Optional[torch.Tensor], torch.Tensor]:
         exit_values = (latents - self.prev_latents).norm(dim=-1) / latents.norm(dim=-1)
-        self.prev_latents = latents
+        self.prev_latents = latents.clone().detach()
         return exit_values < self.exit_threshold, None, exit_values
 
 
