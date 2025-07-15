@@ -177,7 +177,10 @@ class HuginnWrapper(HFLM):
             else:
                 assert transformers.AutoModelForCausalLM == self.AUTO_MODEL_CLASS
                 # inject our custom exit evaluator into the model
-                output = self.model(inps, exit_evaluator=self.exit_evaluator)
+                if self.exit_evaluator is not None:
+                    output = self.model.forward_with_adaptive_compute(inps, exit_evaluator=self.exit_evaluator)
+                else:
+                    output = self.model(inps, exit_evaluator=self.exit_evaluator)
             if (
                 isinstance(output, CausalLMOutputRecurrentLatents)
                 and output.stats is not None
