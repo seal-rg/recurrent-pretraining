@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any, Literal, Optional, Type, Union, Callable, Self, TYPE_CHECKING
 from functools import partial
 from collections import defaultdict
+import contextlib
 
 import torch
 from torch.utils.checkpoint import checkpoint, create_selective_checkpoint_contexts, CheckpointPolicy
@@ -228,6 +229,12 @@ class Config:
         provider = str(self.attn_impl)
         center_attention = bool(self.center_attention)
         debias_attention = bool(self.debias_attention)
+        with contextlib.suppress(ModuleNotFoundError):
+            torch.backends.cuda.enable_flash_sdp(True)
+            torch.backends.cuda.enable_math_sdp(False)
+            torch.backends.cuda.enable_mem_efficient_sdp(False)
+            torch.backends.cuda.enable_cudnn_sdp(False)  # flag is not yet implemented on earlier pytorch versions
+
         if not self.simple_ops:
             return partial(
                 select_attention_implementation,

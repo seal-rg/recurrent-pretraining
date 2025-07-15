@@ -1,0 +1,11 @@
+{
+  "bos_token_id": 65504,
+  "pad_token_id": 65509,
+  "do_sample": true,
+  "eos_token_id": [
+    65505,
+    65508
+  ],
+  "temperature": 0.7,
+  "transformers_version": "4.47.1"
+}

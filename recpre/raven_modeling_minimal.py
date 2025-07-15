@@ -1,4 +1,4 @@
-"""Modeling file for HF compatibility and zero-shot experiments."""
+"""Minimal modeling.py file for HF compatibility and funny zero-shot experiments. Use only for inference."""
 
 import torch
 import math
@@ -557,7 +557,7 @@ class RavenForCausalLM(RavenPreTrainedModel, GenerationMixin):
             H=None,
             Q_LEN=seq_len,
             KV_LEN=kv_length,
-            device=input_ids.device,
+            device=str(input_ids.device),
         )
 
         # # Define mask_mod function
@@ -622,7 +622,7 @@ class RavenForCausalLM(RavenPreTrainedModel, GenerationMixin):
             H=None,
             Q_LEN=seq_len,
             KV_LEN=kv_length,
-            device=input_ids.device,
+            device=str(input_ids.device),
         )
 
         return block_mask
@@ -897,7 +897,7 @@ class RavenForCausalLM(RavenPreTrainedModel, GenerationMixin):
             x.zero_()
         return x
 
-    def _maybe_inject_noise(self, x, current_step, renorm=False):
+    def _maybe_inject_noise(self, x, current_step, renorm=True):
         if self.config.test_time_noise > 0:
             n = self.config.test_time_noise * self.config.init_values["std"] * self.emb_scale
             if self.config.test_time_noise_type == "geom":
@@ -917,8 +917,8 @@ class RavenForCausalLM(RavenPreTrainedModel, GenerationMixin):
             else:
                 raise ValueError()
 
-        if renorm:
-            x = self.transformer.core_block[-1].norm_4(x)  # type: ignore moduledict types still broken in pytorch
+            if renorm:
+                x = self.transformer.core_block[-1].norm_4(x)  # type: ignore moduledict types still broken in pytorch
         return x
 
     def prepare_inputs_for_generation(
@@ -973,6 +973,8 @@ class RavenForCausalLM(RavenPreTrainedModel, GenerationMixin):
         self.generation_config = args[1] if len(args) > 1 else self.generation_config
         if any(k in kwargs for k in ("criterion", "exit_threshold")):
             return self.generate_with_adaptive_compute(*args, **kwargs)
+        elif any(k in kwargs for k in ("draft_steps", "lookahead_for_draft", "verification_threshold")):
+            return self.generate_speculative(*args, **kwargs)
         elif "continuous_compute" in kwargs:
             return self.generate_minimal(*args, **kwargs)
         else:
@@ -1011,7 +1013,7 @@ class RavenForCausalLM(RavenPreTrainedModel, GenerationMixin):
                 lookup_strategy=cache_lookup_strategy,
             )
         model_kwargs["use_cache"] = True
-        model_kwargs = self._get_initial_cache_position(input_ids, model_kwargs)
+        model_kwargs = self._get_initial_cache_position(input_ids.shape[1], input_ids.device, model_kwargs)
         return model_kwargs, generation_config, max_new_tokens
 
     @torch.no_grad()
@@ -1091,15 +1093,24 @@ class RavenForCausalLM(RavenPreTrainedModel, GenerationMixin):
         tokenizer=None,
         streamer=None,
         continuous_compute=False,  # warm-start state / continuous CoT
-        criterion="none",  # off by default, turn on by choosing an exit criterion
+        criterion="none",  # adaptive compute is off by default, turn on by choosing an exit criterion
         exit_threshold: Union[str, float, int] = "auto",
         init_scale: float = 1.0,
         cache_lookup_strategy: str = "full",
+        do_not_exit_in_prefill: bool = False,
+        min_steps: int = 0,
+        check_criterion_every_n_steps=1,
         **model_kwargs,
     ) -> Union[torch.Tensor, GenerateDecoderOnlyOutput]:
         """
         Generate tokens with adaptive compute. This is NOT the most efficient implementation.
         For batches, on each token, we iterate until the entire batch finishes.
+        Note: While the method can be used batched, and will produce sensible results, this cannt be used to evaluate
+              the success of adaptive compute methods, which should only ever be benchmarked with batch_size=1.
+              This is because the KV-cache entries are necessarily batched and so contain entries equal to the sequence
+              with the largest number of steps in the whole batch, and these KV states, which would not have been computed
+              if there was only one (short compute) sequence in the batch, will be picked up by later compute steps,
+              making early exits look better than they are.
         """
         model_kwargs, generation_config, max_new_tokens = self._prep_generate_args(
             input_ids, generation_config, cache_lookup_strategy, model_kwargs
@@ -1119,7 +1130,7 @@ class RavenForCausalLM(RavenPreTrainedModel, GenerationMixin):
         unfinished_sequences = torch.ones(batch_size, dtype=torch.long, device=input_ids.device)
 
         # Generate tokens
-        for _ in range(max_new_tokens):
+        for token_step_in_sequence in range(max_new_tokens):
             # Adaptive compute forward
             model_inputs = self.prepare_inputs_for_generation(input_ids, **model_kwargs)
             aux_inputs = {
@@ -1131,7 +1142,8 @@ class RavenForCausalLM(RavenPreTrainedModel, GenerationMixin):
                 if not continuous_compute
                 else model_kwargs["input_states"]
             )
-
+            if continuous_compute:
+                next_states = current_latents[:, -1:, :].clone()
             # Initialize criterion tracking for each sequence in batch
             exit_values_per_seq = [[] for _ in range(batch_size)]
             compute_steps_per_seq = [0] * batch_size
@@ -1154,13 +1166,15 @@ class RavenForCausalLM(RavenPreTrainedModel, GenerationMixin):
                 stable_for_n_steps = torch.zeros(batch_size, dtype=torch.long, device=input_ids.device)
                 current_argmax = torch.ones(batch_size, dtype=torch.long, device=input_ids.device) * -1
                 exit_threshold = 5 if exit_threshold == "auto" else int(exit_threshold)
+            elif criterion == "cosine":
+                exit_threshold = 0.2 if exit_threshold == "auto" else float(exit_threshold)
             elif criterion == "none":
                 exit_threshold = 1.0 if exit_threshold == "auto" else float(exit_threshold)
             else:
                 raise ValueError("Invalid adaptive compute strategy.")
 
             next_token_logits = None
-
+            logits = None  # type: ignore
             # Iterate through compute steps
             for compute_step in range(max_steps):
                 prev_latents = current_latents.clone()
@@ -1172,7 +1186,13 @@ class RavenForCausalLM(RavenPreTrainedModel, GenerationMixin):
                     current_step=compute_step,
                 )
 
-                if _ > 0:  # do not exit in prefill
+                if (  # Skip checking exit?
+                    compute_step < min_steps
+                    or compute_step % check_criterion_every_n_steps != 0
+                    or (do_not_exit_in_prefill and token_step_in_sequence == 0)
+                ):
+                    continue
+                else:
                     # Check exit condition for each sequence in batch
                     if criterion == "entropy-diff":
                         prev_entropy = entropy
@@ -1199,6 +1219,12 @@ class RavenForCausalLM(RavenPreTrainedModel, GenerationMixin):
                         else:
                             log_probs = F.log_softmax(logits[:, -1, :].float(), dim=-1)
                         exit_values = F.kl_div(log_probs, prev_log_probs, reduction="none", log_target=True).sum(dim=-1)
+                    elif criterion == "cosine":
+                        exit_values = 1 - (
+                            (current_latents * prev_latents).sum(dim=-1)
+                            / current_latents.norm(dim=-1)
+                            / prev_latents.norm(dim=-1)
+                        ).mean(dim=1)
                     elif criterion == "argmax-stability":
                         prev_argmax = current_argmax
                         outputs = self.predict_from_latents(current_latents, **aux_inputs)
@@ -1219,15 +1245,15 @@ class RavenForCausalLM(RavenPreTrainedModel, GenerationMixin):
                     # Check for new exits, respecting unfinished_sequences
                     new_exits = (
                         exit_values < exit_threshold
-                        if criterion != "argmax-stability"
+                        if criterion not in ["argmax-stability"]
                         else exit_values >= exit_threshold
                     )
                     new_exits = new_exits & ~exit_reached & unfinished_sequences.bool()
 
                     if new_exits.any():
                         exit_reached = exit_reached | new_exits
-                        if criterion == "latent-diff":
-                            # Normally we don't compute the output for latent-diff, but when there is an exit,
+                        if logits is None:
+                            # Normally we don't compute the output for latent criteria, but when there is an exit,
                             # we need to compute and save the output
                             outputs = self.predict_from_latents(current_latents, **aux_inputs)
                             logits: torch.Tensor = outputs.logits  # type: ignore
@@ -1240,6 +1266,8 @@ class RavenForCausalLM(RavenPreTrainedModel, GenerationMixin):
                         for i in range(batch_size):
                             if new_exits[i]:
                                 compute_steps_per_seq[i] = compute_step + 1
+                        if continuous_compute:
+                            next_states[new_exits] = current_latents[new_exits, -1:, :]
 
                     # If all sequences have exited or finished, break early
                     if (exit_reached | ~unfinished_sequences.bool()).all():
@@ -1251,6 +1279,9 @@ class RavenForCausalLM(RavenPreTrainedModel, GenerationMixin):
                 # For sequences that didn't exit early, use the final logits
                 if next_token_logits is None:
                     next_token_logits = outputs.logits[:, -1, :].to(**logit_type)  # type: ignore
+                    for i in range(batch_size):
+                        compute_steps_per_seq[i] = max_steps
+
                 else:
                     for i in range(batch_size):
                         if not exit_reached[i] and unfinished_sequences[i].bool():
@@ -1259,7 +1290,9 @@ class RavenForCausalLM(RavenPreTrainedModel, GenerationMixin):
 
             # Save latent states for continuous compute if enabled
             if continuous_compute:
-                model_kwargs["input_states"] = current_latents[:, -1:, :]
+                still_running = ~exit_reached & unfinished_sequences.bool()
+                next_states[still_running] = current_latents[still_running, -1:, :]
+                model_kwargs["input_states"] = next_states
 
             # Record compute steps for this token generation
             compute_steps.append([compute_steps_per_seq, exit_values_per_seq])
