@@ -8,12 +8,15 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import transformers
 from transformers import GenerationConfig
+from transformers.generation.utils import GenerateDecoderOnlyOutput
+
 import torch
 from lm_eval import evaluator
 from lm_eval.models.huggingface import HFLM
 from lm_eval.models.utils import stop_sequences_criteria
 
-from recpre.raven_modeling_minimal import CausalSelfAttention, RavenForCausalLM
+from recpre.raven_modeling_minimal import CausalSelfAttention, RavenForCausalLM, CausalLMOutputRecurrentLatents
+from recpre.raven_modeling_minimal import PerLoopExitEvaluator, PredeterminedExitEvaluator
 from evaluate_raven.quick_checkpoint_eval import prepare_results
 
 
@@ -25,7 +28,9 @@ def update_huggingface_implementation(model):
     #         module.forward = types.MethodType(CausalSelfAttention.forward, module)
     model.generate = types.MethodType(RavenForCausalLM.generate, model)
     model.generate_with_adaptive_compute = types.MethodType(RavenForCausalLM.generate_with_adaptive_compute, model)
-
+    model.forward = types.MethodType(RavenForCausalLM.forward, model)
+    model.forward_with_adaptive_compute = types.MethodType(RavenForCausalLM.forward_with_adaptive_compute, model)
+    model.prefill_with_varied_exit_steps = types.MethodType(RavenForCausalLM.prefill_with_varied_exit_steps, model)
 
 class HuginnWrapper(HFLM):
     """Wrapper for Huginn model using lm_eval, extending HFLM."""
@@ -40,6 +45,7 @@ class HuginnWrapper(HFLM):
         lookup_strategy: str = "full",
         continuous_compute: bool = False,
         latent_dampening: bool = False,
+        exit_evaluator: Optional[PerLoopExitEvaluator | PredeterminedExitEvaluator] = None,
         # override whether the model should be treated as decoder-only (causal) or encoder-decoder (seq2seq)
         revision: Optional[str] = "main",
         subfolder: Optional[str] = None,
@@ -106,7 +112,9 @@ class HuginnWrapper(HFLM):
         self.lookup_strategy = lookup_strategy
         self.continuous_compute = continuous_compute
         self.latent_dampening = latent_dampening
+        self.exit_evaluator = exit_evaluator
         update_huggingface_implementation(self.model)
+        self.compute_steps = []
 
     def _model_generate(self, context, max_length, stop, **generation_kwargs):
         # The generation configs is only used by the custom generate function call, 
@@ -116,8 +124,9 @@ class HuginnWrapper(HFLM):
             max_length=max_length,
             use_cache=True,
             pad_token_id=self.tokenizer.pad_token_id,
+            return_dict_in_generate=True,
         )
-        return super()._model_generate(
+        output = super()._model_generate(
             context,
             max_length,
             stop,
@@ -127,13 +136,54 @@ class HuginnWrapper(HFLM):
             cache_kwargs={"lookup_strategy": self.lookup_strategy},
             continuous_compute=self.continuous_compute,
             latent_dampening=self.latent_dampening,
+            exit_evaluator=self.exit_evaluator,
             **generation_kwargs
         )
+        # Capture compute_steps if available
+        if isinstance(output, GenerateDecoderOnlyOutput):
+            compute_steps = [[] for _ in range(self.batch_size)] # type: ignore
+            if output.scores is not None:
+                for s in output.scores:
+                    for i in range(self.batch_size): # type: ignore
+                        compute_steps[i].append(s[0][i])
+                self.compute_steps.append(compute_steps)
+            return output.sequences
+        return output
+
+    def _model_call(self, inps, attn_mask=None, labels=None):
+        """
+        :param inps: torch.Tensor
+            A torch tensor of shape [batch, (sequence_ctx + sequence_cont)] or of shape
+            [batch, sequence_ctx]. the size of sequence may vary from call to call
+        :param attn_mask: torch.Tensor, optional
+            A torch tensor of shape [batch, (sequence_ctx + sequence_cont)]. Only passed
+            (and must be passed) if self.AUTO_MODEL_CLASS is transformers.AutoModelForSeq2SeqLM
+        :param labels: torch.Tensor, optional
+            A torch tensor of shape [batch, (sequence_ctx + sequence_cont)]. Only passed
+            (and must be passed) if self.AUTO_MODEL_CLASS is transformers.AutoModelForSeq2SeqLM
+        :return
+            A torch tensor of shape [batch, sequence, vocab] with the
+        logits returned from the model's decoder
+        """
+        with torch.no_grad():
+            if attn_mask is not None or labels is not None:
+                assert attn_mask is not None and labels is not None
+                assert self.AUTO_MODEL_CLASS == transformers.AutoModelForSeq2SeqLM
+                output = self.model(
+                    input_ids=inps, attention_mask=attn_mask, labels=labels
+                )
+            else:
+                assert self.AUTO_MODEL_CLASS == transformers.AutoModelForCausalLM
+                # inject our custom exit evaluator into the model
+                output = self.model(inps, exit_evaluator=self.exit_evaluator)
+            if isinstance(output, CausalLMOutputRecurrentLatents) and output.stats is not None and "compute_steps" in output.stats:
+                self.compute_steps.append(output.stats["compute_steps"])
+            return output.logits
 
 
 def evaluate_single_task(
     task_name="gsm8k",
-    model_name="tomg-group-umd/huginn-0125",
+    model: Union[str, RavenForCausalLM] = "tomg-group-umd/huginn-0125",
     device="cuda",
     batch_size=16,
     num_fewshot=5,
@@ -142,9 +192,13 @@ def evaluate_single_task(
     exit_threshold: Optional[Union[str, float, int]] = "auto",
     num_steps=32,
     lookup_strategy="full",
+    exit_evaluator: Optional[PerLoopExitEvaluator | PredeterminedExitEvaluator] = None,
     continuous_compute=False,
     latent_dampening=False,
+    output_filepath: Optional[str] = None,
+    system_instruction: Optional[str] = None,
 ):
+    model_name = model if isinstance(model, str) else "custom_model"
     config_args = {
         "task_name": task_name,
         "model_name": model_name,
@@ -156,11 +210,13 @@ def evaluate_single_task(
         "exit_threshold": exit_threshold,
         "num_steps": num_steps,
         "lookup_strategy": lookup_strategy,
+        "system_instruction": system_instruction,
+        "exit_evaluator": exit_evaluator.__class__.__name__ if exit_evaluator is not None else None,
     }
 
     print(f"Evaluating {model_name} on {task_name} with config: {config_args}")
-    model = HuginnWrapper(
-        pretrained=model_name,
+    model_wrapper = HuginnWrapper(
+        pretrained=model,
         device=device,
         batch_size=batch_size,
         trust_remote_code=True,
@@ -170,18 +226,27 @@ def evaluate_single_task(
         lookup_strategy=lookup_strategy,
         continuous_compute=continuous_compute,
         latent_dampening=latent_dampening,
+        exit_evaluator=exit_evaluator,
     )
     results = evaluator.simple_evaluate(
-        model=model,
+        model=model_wrapper,
         tasks=[task_name],
         num_fewshot=num_fewshot,
         limit=limit,
+        system_instruction=system_instruction,
         gen_kwargs=f"num_steps={num_steps}",
     )
     
     if results is not None:
         results["config_args"] = config_args
-        prepare_results(results, Path(f"{task_name}_results.json"))
+        # Add avg_compute_steps to results if available
+        if hasattr(model_wrapper, 'compute_steps') and model_wrapper.compute_steps:
+            results["compute_steps"] = model_wrapper.compute_steps
+
+        if output_filepath is not None:
+            prepare_results(results, Path(output_filepath))
+        else:
+            prepare_results(results, Path(f"{task_name}_results.json"))
     return results
 
 if __name__ == "__main__":
@@ -204,6 +269,8 @@ if __name__ == "__main__":
                         help="Lookup strategy for caching, also supports values like `compression-s4`")
     parser.add_argument("--continuous-compute", dest="continuous_compute", type=bool, default=False, help="Continuous compute")
     parser.add_argument("--latent-dampening", dest="latent_dampening", type=bool, default=False, help="Latent dampening")
+    parser.add_argument("--system-instruction", dest="system_instruction", type=str, default=None, help="System instruction")
+    parser.add_argument("--output-filepath", dest="output_filepath", type=str, default=None, help="Output filepath")
 
     args = parser.parse_args()
 
@@ -220,7 +287,7 @@ if __name__ == "__main__":
 
     results = evaluate_single_task(
         task_name=args.task_name,
-        model_name=args.model_name,
+        model=args.model_name,
         device=args.device,
         batch_size=args.batch_size,
         num_fewshot=args.num_fewshot,
@@ -231,4 +298,6 @@ if __name__ == "__main__":
         lookup_strategy=args.lookup_strategy,
         continuous_compute=args.continuous_compute,
         latent_dampening=args.latent_dampening,
+        system_instruction=args.system_instruction,
+        output_filepath=args.output_filepath,
     )
