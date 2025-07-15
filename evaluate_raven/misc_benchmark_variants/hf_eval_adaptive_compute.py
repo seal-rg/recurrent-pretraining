@@ -1,10 +1,15 @@
+"""This script is an alternative option to using lm-eval to check adaptive exits. If you are new to this code base,
+you should probably just use lm-eval.
+"""
+
 from pathlib import Path
 from typing import Literal, Optional, Union
 import os
 import sys
+import contextlib
 
 # Add the parent directory to the Python path to make recpre importable
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 import transformers
 from transformers import GenerationConfig
@@ -13,9 +18,9 @@ from transformers.generation.utils import GenerateDecoderOnlyOutput
 import torch
 from lm_eval import evaluator
 from lm_eval.models.huggingface import HFLM
-from lm_eval.models.utils import stop_sequences_criteria
 
-from recpre.raven_modeling_minimal import CausalSelfAttention, RavenForCausalLM, CausalLMOutputRecurrentLatents
+
+from recpre.raven_modeling_minimal import RavenForCausalLM, CausalLMOutputRecurrentLatents
 from recpre.raven_modeling_minimal import PerLoopExitEvaluator, PredeterminedExitEvaluator
 from evaluate_raven.quick_checkpoint_eval import prepare_results
 
@@ -23,6 +28,7 @@ from evaluate_raven.quick_checkpoint_eval import prepare_results
 def update_huggingface_implementation(model):
     """This function selectively updates function implementations in the huggingface model."""
     import types
+
     # for name, module in model.named_modules():
     #     if module.__class__.__name__ == "CausalSelfAttention":
     #         module.forward = types.MethodType(CausalSelfAttention.forward, module)
@@ -31,6 +37,7 @@ def update_huggingface_implementation(model):
     model.forward = types.MethodType(RavenForCausalLM.forward, model)
     model.forward_with_adaptive_compute = types.MethodType(RavenForCausalLM.forward_with_adaptive_compute, model)
     model.prefill_with_varied_exit_steps = types.MethodType(RavenForCausalLM.prefill_with_varied_exit_steps, model)
+
 
 class HuginnWrapper(HFLM):
     """Wrapper for Huginn model using lm_eval, extending HFLM."""
@@ -44,7 +51,6 @@ class HuginnWrapper(HFLM):
         exit_threshold: Optional[Union[str, float, int]] = "auto",
         lookup_strategy: str = "full",
         continuous_compute: bool = False,
-        latent_dampening: bool = False,
         exit_evaluator: Optional[PerLoopExitEvaluator | PredeterminedExitEvaluator] = None,
         # override whether the model should be treated as decoder-only (causal) or encoder-decoder (seq2seq)
         revision: Optional[str] = "main",
@@ -105,19 +111,18 @@ class HuginnWrapper(HFLM):
             delta,
             autogptq,
             gptqmodel,
-            **kwargs
+            **kwargs,
         )
         self.criterion = criterion
         self.exit_threshold = exit_threshold
         self.lookup_strategy = lookup_strategy
         self.continuous_compute = continuous_compute
-        self.latent_dampening = latent_dampening
         self.exit_evaluator = exit_evaluator
         update_huggingface_implementation(self.model)
         self.compute_steps = []
 
     def _model_generate(self, context, max_length, stop, **generation_kwargs):
-        # The generation configs is only used by the custom generate function call, 
+        # The generation configs is only used by the custom generate function call,
         # whereas the standard generate function call uses these args directly passed in.
         # So we need to pass both, and have the dispatching generate function call decide which to use.
         generation_config = GenerationConfig(
@@ -131,20 +136,19 @@ class HuginnWrapper(HFLM):
             max_length,
             stop,
             generation_config=generation_config,
-            criterion=self.criterion, 
-            exit_threshold=self.exit_threshold, 
+            criterion=self.criterion,
+            exit_threshold=self.exit_threshold,
             cache_kwargs={"lookup_strategy": self.lookup_strategy},
             continuous_compute=self.continuous_compute,
-            latent_dampening=self.latent_dampening,
             exit_evaluator=self.exit_evaluator,
-            **generation_kwargs
+            **generation_kwargs,
         )
         # Capture compute_steps if available
         if isinstance(output, GenerateDecoderOnlyOutput):
-            compute_steps = [[] for _ in range(self.batch_size)] # type: ignore
+            compute_steps = [[] for _ in range(self.batch_size)]  # type: ignore
             if output.scores is not None:
                 for s in output.scores:
-                    for i in range(self.batch_size): # type: ignore
+                    for i in range(self.batch_size):  # type: ignore
                         compute_steps[i].append(s[0][i])
                 self.compute_steps.append(compute_steps)
             return output.sequences
@@ -168,15 +172,17 @@ class HuginnWrapper(HFLM):
         with torch.no_grad():
             if attn_mask is not None or labels is not None:
                 assert attn_mask is not None and labels is not None
-                assert self.AUTO_MODEL_CLASS == transformers.AutoModelForSeq2SeqLM
-                output = self.model(
-                    input_ids=inps, attention_mask=attn_mask, labels=labels
-                )
+                assert transformers.AutoModelForSeq2SeqLM == self.AUTO_MODEL_CLASS
+                output = self.model(input_ids=inps, attention_mask=attn_mask, labels=labels)
             else:
-                assert self.AUTO_MODEL_CLASS == transformers.AutoModelForCausalLM
+                assert transformers.AutoModelForCausalLM == self.AUTO_MODEL_CLASS
                 # inject our custom exit evaluator into the model
                 output = self.model(inps, exit_evaluator=self.exit_evaluator)
-            if isinstance(output, CausalLMOutputRecurrentLatents) and output.stats is not None and "compute_steps" in output.stats:
+            if (
+                isinstance(output, CausalLMOutputRecurrentLatents)
+                and output.stats is not None
+                and "compute_steps" in output.stats
+            ):
                 self.compute_steps.append(output.stats["compute_steps"])
             return output.logits
 
@@ -194,7 +200,6 @@ def evaluate_single_task(
     lookup_strategy="full",
     exit_evaluator: Optional[PerLoopExitEvaluator | PredeterminedExitEvaluator] = None,
     continuous_compute=False,
-    latent_dampening=False,
     output_filepath: Optional[str] = None,
     system_instruction: Optional[str] = None,
 ):
@@ -225,7 +230,6 @@ def evaluate_single_task(
         exit_threshold=exit_threshold,
         lookup_strategy=lookup_strategy,
         continuous_compute=continuous_compute,
-        latent_dampening=latent_dampening,
         exit_evaluator=exit_evaluator,
     )
     results = evaluator.simple_evaluate(
@@ -236,11 +240,11 @@ def evaluate_single_task(
         system_instruction=system_instruction,
         gen_kwargs=f"num_steps={num_steps}",
     )
-    
+
     if results is not None:
         results["config_args"] = config_args
         # Add avg_compute_steps to results if available
-        if hasattr(model_wrapper, 'compute_steps') and model_wrapper.compute_steps:
+        if hasattr(model_wrapper, "compute_steps") and model_wrapper.compute_steps:
             results["compute_steps"] = model_wrapper.compute_steps
 
         if output_filepath is not None:
@@ -249,27 +253,47 @@ def evaluate_single_task(
             prepare_results(results, Path(f"{task_name}_results.json"))
     return results
 
+
 if __name__ == "__main__":
     import argparse
-    
+
     parser = argparse.ArgumentParser(description="Evaluate a model on a task with adaptive compute.")
     parser.add_argument("--task-name", dest="task_name", type=str, default="gsm8k", help="Task to evaluate on")
-    parser.add_argument("--model-name", dest="model_name", type=str, default="tomg-group-umd/huginn-0125", help="Model to evaluate")
+    parser.add_argument(
+        "--model-name", dest="model_name", type=str, default="tomg-group-umd/huginn-0125", help="Model to evaluate"
+    )
     parser.add_argument("--device", type=str, default="cuda", help="Device to run on (cuda, cpu)")
     parser.add_argument("--batch-size", dest="batch_size", type=int, default=16, help="Batch size for evaluation")
     parser.add_argument("--num-fewshot", dest="num_fewshot", type=int, default=5, help="Number of few-shot examples")
     parser.add_argument("--limit", type=int, default=None, help="Limit number of examples to evaluate")
-    parser.add_argument("--criterion", type=str, default="entropy-diff", 
-                        choices=["entropy-diff", "latent-diff", "minp-kl", "argmax-stability", "none"],
-                        help="Criterion for adaptive compute. Pass `none` to disable adaptive compute.")
-    parser.add_argument("--exit-threshold", dest="exit_threshold", type=str, default="auto",
-                        help="Exit threshold for adaptive compute. Pass `none` to disable adaptive compute.")
+    parser.add_argument(
+        "--criterion",
+        type=str,
+        default="entropy-diff",
+        choices=["entropy-diff", "latent-diff", "minp-kl", "argmax-stability", "none"],
+        help="Criterion for adaptive compute. Pass `none` to disable adaptive compute.",
+    )
+    parser.add_argument(
+        "--exit-threshold",
+        dest="exit_threshold",
+        type=str,
+        default="auto",
+        help="Exit threshold for adaptive compute. Pass `none` to disable adaptive compute.",
+    )
     parser.add_argument("--num-steps", dest="num_steps", type=int, default=32, help="Number of steps for generation")
-    parser.add_argument("--lookup-strategy", dest="lookup_strategy", type=str, default="full", 
-                        help="Lookup strategy for caching, also supports values like `compression-s4`")
-    parser.add_argument("--continuous-compute", dest="continuous_compute", type=bool, default=False, help="Continuous compute")
-    parser.add_argument("--latent-dampening", dest="latent_dampening", type=bool, default=False, help="Latent dampening")
-    parser.add_argument("--system-instruction", dest="system_instruction", type=str, default=None, help="System instruction")
+    parser.add_argument(
+        "--lookup-strategy",
+        dest="lookup_strategy",
+        type=str,
+        default="full",
+        help="Lookup strategy for caching, also supports values like `compression-s4`",
+    )
+    parser.add_argument(
+        "--continuous-compute", dest="continuous_compute", type=bool, default=False, help="Continuous compute"
+    )
+    parser.add_argument(
+        "--system-instruction", dest="system_instruction", type=str, default=None, help="System instruction"
+    )
     parser.add_argument("--output-filepath", dest="output_filepath", type=str, default=None, help="Output filepath")
 
     args = parser.parse_args()
@@ -280,10 +304,8 @@ if __name__ == "__main__":
     # Try to convert exit_threshold to float if it's numeric
     exit_threshold = None if args.exit_threshold == "none" else args.exit_threshold
     if exit_threshold != "auto" and exit_threshold is not None:
-        try:
-            exit_threshold = float(exit_threshold)
-        except ValueError:
-            pass  # Keep as string if not convertible to float
+        with contextlib.suppress(ValueError):
+            exit_threshold = float(exit_threshold)  # Keep as string if not convertible to float
 
     results = evaluate_single_task(
         task_name=args.task_name,
@@ -297,7 +319,6 @@ if __name__ == "__main__":
         num_steps=args.num_steps,
         lookup_strategy=args.lookup_strategy,
         continuous_compute=args.continuous_compute,
-        latent_dampening=args.latent_dampening,
         system_instruction=args.system_instruction,
         output_filepath=args.output_filepath,
     )
