@@ -1519,7 +1519,10 @@ class RavenForCausalLM(RavenPreTrainedModel, GenerationMixin):
     def _get_stops(self, generation_config, tokenizer, model_kwargs):
         stop_tokens = {65504, 65505, 65508}  # begin_text, end_text, end_turn
         if generation_config.eos_token_id is not None:
-            stop_tokens.add(generation_config.eos_token_id)
+            try:
+                stop_tokens.update(generation_config.eos_token_id)
+            except TypeError:
+                stop_tokens.add(generation_config.eos_token_id)
         if "stopping_criteria" in model_kwargs and tokenizer is None:
             tokenizer = model_kwargs["stopping_criteria"][0].tokenizer
         if hasattr(generation_config, "stop_strings") and tokenizer and generation_config.stop_strings:
