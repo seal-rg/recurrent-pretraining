@@ -1,10 +1,12 @@
-# Pretraining a Depth-Recurrent Model
+# Code for Pretraining and Inference of Huginn-0125 -  a Depth-Recurrent Model
 
 This repo contains the code we used to train a recurrent-depth model at scale on 4096 AMD GPUs on Frontier. All details on this model can be found in the tech report: "Scaling up Test-Time Compute with Latent Reasoning: A Recurrent Depth Approach" (https://www.arxiv.org/abs/2502.05171). The final model is `huginn-0125`, which can be found here: https://huggingface.co/tomg-group-umd/huginn-0125. 
 
-This repo is based on a fork of https://github.com/Lightning-AI/litgpt, which was very helpful to bootstrap our efforts, but little `litgpt` code remains at this stage. Code in this repository was written by Jonas Geiping, John Kirchenbauer, Sean McLeish, Khalid Saifullah, Manli Shu, Neel Jain, Siddarth Singh, Abhimanyu Hans, Monte Hoover and Prajwal Singhanaia.
+Over time, we have also accumulated a good amount of code used for testing and inference, especially the HF-compatible modeling file `recpre/raven_modeling_minimal.py` and inference scripts in `evaluate_raven`. Benchmarking through `lm-eval` is supported, see more infos below.
 
-This repo also contains all code to prepare the tokenizer and data, mostly in `scripts/`. 
+This repo was originally based on a fork of https://github.com/Lightning-AI/litgpt, which was very helpful to bootstrap our efforts, but little `litgpt` code remains at this stage. Code in this repository was written by Jonas Geiping, John Kirchenbauer, Sean McLeish, Khalid Saifullah, Manli Shu, Neel Jain, Siddarth Singh, Abhimanyu Hans, Monte Hoover and Prajwal Singhanaia.
+
+This repo also contains all code we used to prepare the model's  tokenizer and data, mostly in `scripts/`. 
 
 I (Jonas) do not necessarily think that you should pretrain your own model with this implementation, but I hope it serves as a useful reference for the exact choices we took to run this model (at all), and how we ran this model given the limitations of AMD systems. **If you are working with either of these, feel free to always raise an issue asking for more details.**
 
