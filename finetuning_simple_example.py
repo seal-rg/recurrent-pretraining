@@ -1,5 +1,5 @@
 """Simple(ish), self-contained finetuning script. Training on GSM8k like in this example will not improve flexible extract,
-but the model will quickly learn the correct format and strict match will rise, showing that finetuning works.
+but the model will quickly learn the format and strict match will rise.
 
 built around minimal train.py variant
 
@@ -32,9 +32,9 @@ from lm_eval import evaluator
 from lm_eval.models.huggingface import HFLM
 from lm_eval.utils import make_table
 
-USE_LOCAL_CODE = False
+USE_LOCAL_CODE = True
 if USE_LOCAL_CODE:
-    import recpre  # noqa
+    import litgpt  # noqa
 
 
 # Check device health immediately after loading torch and standard libraries without loading cuda/hip/dist:
@@ -61,12 +61,13 @@ if int(os.getenv("SLURM_PROCID", "0")) == 0:
 @dataclass
 class CLISettings:
     run_name: str = "default-run"
-    out_path: str = "sanity_check_runs"
+    out_path: str = "outputs"
     # data
     dataset_location: str = "openai/gsm8k"
+    model_name: str = "tomg-group-umd/huginn-0125"
     dataset_args: dict[str, Any] = field(default_factory=lambda: dict(q_col="question", a_col="answer"))
     dataset_config: str = "main"
-    max_length: int = 128
+    max_seq_length: int = 128
     max_samples: Optional[int] = None
     # impl
     micro_batch_size: int = 2
@@ -79,14 +80,14 @@ class CLISettings:
     optim_config: dict[str, Any] = field(
         default_factory=lambda: dict(lr=5e-7, weight_decay=0.0, betas=(0.9, 0.95), eps=1e-8)
     )
-    scheduler_args: dict[float, Any] = field(
-        default_factory=lambda: dict(warmup=0.1, cooldown=0.1, min_lr_ratio=0.001)
-    )  # min_lr = min_lr_ratio * lr
+    scheduler_args: dict[float, Any] = field(default_factory=lambda: dict(warmup=0.1, cooldown=0.1, min_lr_ratio=0.001))  # type: ignore # min_lr = min_lr_ratio * lr
     eval_interval: int = 1_000_000_000
-    model_name: str = "tomg-group-umd/huginn-0125"
     seed: int = 74
     take_loss_over_all_tokens: bool = False  # for chat templated datasets default is to only supervise assistant tokens
     max_grad_norm: float = 1_000_000.0  # i.e. unused unless something is going very wrong
+    precision: str = "bf16-true"
+    gradient_checkpointing: bool = False
+    save_final_checkpoint: bool = False
 
     def __post_init__(self):
         pass
@@ -106,8 +107,8 @@ def is_main_process():
 
 
 def seed_everything(seed):
-    import random
-    import numpy as np
+    import random  # noqa: PLC0415
+    import numpy as np  # noqa: PLC0415
 
     random.seed(seed)
     np.random.seed(seed)
@@ -145,17 +146,28 @@ def startup(cfg: CLISettings):
     else:
         world_size = 1
         distributed = False
-    torch.set_default_dtype(torch.bfloat16)
     torch.cuda.set_device(local_device)
+
+    if cfg.precision == "bf16-true":
+        torch.set_default_dtype(torch.bfloat16)
+        weight_dtype = torch.bfloat16
+        autocast_args = {"device_type": "cuda", "enabled": False, "dtype": torch.bfloat16}
+    elif cfg.precision == "bf16-mixed":
+        torch.set_default_dtype(torch.float32)
+        weight_dtype = torch.float32
+        autocast_args = {"device_type": "cuda", "enabled": True, "dtype": torch.bfloat16}
 
     ########## Model and tokenizer ##############
     model = AutoModelForCausalLM.from_pretrained(
         cfg.model_name,
         trust_remote_code=not USE_LOCAL_CODE,
-        torch_dtype=torch.bfloat16,
+        torch_dtype=weight_dtype,
         low_cpu_mem_usage=True,
-        device_map=local_device,
+        device_map="cuda",
     )
+    if cfg.gradient_checkpointing:
+        model.gradient_checkpointing_enable()
+        # model.config.gradient_checkpointing = True
     tokenizer = AutoTokenizer.from_pretrained(cfg.model_name)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
@@ -191,7 +203,7 @@ def startup(cfg: CLISettings):
                 add_generation_prompt=False,
                 return_assistant_tokens_mask=True,
                 padding="max_length",
-                max_length=cfg.max_length + 1,
+                max_length=cfg.max_seq_length + 1,
                 return_tensors="pt",
                 return_dict=True,
                 truncation=True,
@@ -202,19 +214,19 @@ def startup(cfg: CLISettings):
             chat_encoding = tokenizer(
                 conversations,
                 padding="max_length",
-                max_length=cfg.max_length + 1,
+                max_length=cfg.max_seq_length + 1,
                 return_tensors="pt",
                 truncation=True,
             )
             chat_encoding["assistant_masks"] = chat_encoding["attention_mask"].clone()
 
         return {
-            "token_ids": chat_encoding["input_ids"],
+            "input_ids": chat_encoding["input_ids"],
             "mask": chat_encoding["assistant_masks"],
             "attention_mask": chat_encoding["attention_mask"],
         }
 
-    cfg.token_id_col_name = "token_ids"
+    cfg.token_id_col_name = "input_ids"  # type: ignore
     dataset_save_dir = f"{cfg.out_path}/{cfg.run_name}/dataset"
     if is_main_process():  # only do mapping on rank 0
         try:
@@ -243,17 +255,23 @@ def startup(cfg: CLISettings):
         tokenized_dataset = load_from_disk(dataset_save_dir)
         torch.distributed.barrier()
 
+    if rank == 0:
+        idx = int(torch.randint(len(tokenized_dataset), (1,)))
+        print(f"-----------------------------------Processed Data example idx {idx}:----------------------------")
+        print(tokenized_dataset[idx])
+        print(tokenizer.decode(tokenized_dataset[idx]["input_ids"], skip_special_tokens=False))
+        print("--------------------------------------------------------------------------------------------")
     tokenized_dataset.set_format("pt")
     if distributed:
         sampler = torch.utils.data.DistributedSampler(
-            tokenized_dataset,
+            tokenized_dataset,  # type: ignore
             shuffle=True,
             num_replicas=world_size,
             rank=rank,
             seed=cfg.seed,
         )
         dataloader = torch.utils.data.DataLoader(
-            tokenized_dataset,
+            tokenized_dataset,  # type: ignore
             batch_size=cfg.micro_batch_size,
             sampler=sampler,
             pin_memory=True,
@@ -270,16 +288,16 @@ def startup(cfg: CLISettings):
     accumulation_steps = max(1, cfg.batch_size // cfg.micro_batch_size)
     num_update_steps_per_epoch = math.ceil(len(dataloader) / accumulation_steps)
     max_training_steps = cfg.epochs * num_update_steps_per_epoch
-    num_warmup_steps = math.ceil(cfg.scheduler_args["warmup"] * max_training_steps)
-    num_decay_steps = math.ceil(cfg.scheduler_args["cooldown"] * max_training_steps)
+    num_warmup_steps = math.ceil(cfg.scheduler_args["warmup"] * max_training_steps)  # type: ignore
+    num_decay_steps = math.ceil(cfg.scheduler_args["cooldown"] * max_training_steps)  # type: ignore
     scheduler = get_scheduler(
         name="warmup_stable_decay",
-        optimizer=optimizer.base_optimizer if cfg.sam else optimizer,
+        optimizer=optimizer,
         num_warmup_steps=num_warmup_steps,
         num_training_steps=max_training_steps,
         scheduler_specific_kwargs={
             "num_decay_steps": num_decay_steps,
-            "min_lr_ratio": cfg.scheduler_args["min_lr_ratio"],
+            "min_lr_ratio": cfg.scheduler_args["min_lr_ratio"],  # type: ignore
         },
     )
 
@@ -289,10 +307,12 @@ def startup(cfg: CLISettings):
         "tokenizer": tokenizer,
         "dataloader": dataloader,
         "distributed": distributed,
+        "rank": rank,
         "scheduler": scheduler,
+        "autocast_args": autocast_args,
     }
 
-    cfg.world_size = world_size
+    cfg.world_size = world_size  # type: ignore
     return state, local_device
 
 
@@ -306,13 +326,6 @@ def train(state, device, cfg):
     total_tokens = 0
     total_tokens_with_loss = 0
     tokens_in_step = 0
-
-    output_details = {
-        "return_logits": False,
-        "return_latents": False,
-        "return_head": False,
-        "return_stats": True,
-    }
 
     metrics_to_agg_data_step = {
         "loss": [],
@@ -336,40 +349,36 @@ def train(state, device, cfg):
             # The actual compute step of  Forward, loss, and backward computation:
             def tightly_scoped_fwd_bwd(model, input_ids, labels):
                 with model.no_sync() if is_accumulating and state["distributed"] else nullcontext():
-                    outputs = model(input_ids, labels=labels, output_details=output_details)
+                    with torch.autocast(**state["autocast_args"]):
+                        outputs = model(input_ids, labels=labels)
                     (outputs["loss"] / accumulation_steps).backward()
-                    return (
-                        outputs["loss"].detach(),
-                        outputs["log_ppl"].detach(),
-                        outputs["stats"]["num_steps_no_grad"],
-                        outputs["stats"]["num_steps_with_grad"],
-                    )
+                    return (outputs["loss"].detach(), outputs["log_ppl"].detach())
 
-            loss, log_ppl, num_steps_no_grad, num_steps_with_grad = tightly_scoped_fwd_bwd(model, input_ids, labels)
+            loss, log_ppl = tightly_scoped_fwd_bwd(model, input_ids, labels)
 
             # logging
             metrics_to_agg_data_step["loss"].append(loss.item())
             metrics_to_agg_data_step["log_ppl"].append(log_ppl.item())
 
-            if (not is_accumulating) and (not cfg.sam):
+            if not is_accumulating:
                 total_norm = torch.nn.utils.clip_grad_norm_(
                     model.parameters(), max_norm=cfg.max_grad_norm, norm_type=2.0
-                ).item()
+                )
                 optimizer.step()
                 optimizer.zero_grad(set_to_none=True)
                 state["scheduler"].step()
                 optimizer_step += 1
 
-            if not is_accumulating:
-                time_interval = (time.time() - step_time) / accumulation_steps
-                tok_sec = tokens_in_step / (time.time() - step_time)
-                print(
-                    f"GPU: {model.device} | Step: {data_step:4d} | Updates: {optimizer_step:4d} | Time/step: {time_interval:2.4f}"
-                    f" | Tok/sec={tok_sec:9.2f} | Loss: {loss:2.4f} / log-ppl: {log_ppl:2.4f} | Grad-Norm {total_norm:2.4f}"
-                )
-                total_tokens += tokens_in_step
-                step_time = time.time()
-                tokens_in_step = 0
+                if state["rank"] == 0:
+                    time_interval = (time.time() - step_time) / accumulation_steps
+                    tok_sec = tokens_in_step * cfg.world_size / (time.time() - step_time)
+                    print(
+                        f"GPU: {model.device} | Step: {data_step:4d} | Updates: {optimizer_step:4d} | Time/step: {time_interval:2.4f}"
+                        f" | Tok/sec={tok_sec:9.2f} | Loss: {loss:2.4f} / log-ppl: {log_ppl:2.4f} | Grad-Norm {total_norm.item():2.4f}"
+                    )
+                    total_tokens += tokens_in_step * cfg.world_size
+                    step_time = time.time()
+                    tokens_in_step = 0
 
             if optimizer_step and (optimizer_step % cfg.eval_interval == 0):
                 validate(state, optimizer_step, cfg)
@@ -384,11 +393,9 @@ def train(state, device, cfg):
 ####################################################################################################
 # Main control loop
 ####################################################################################################
-results_store = {}
 
 
 def validate(state, step, cfg, task="gsm8k"):
-    global results_store
     # eval on-the-fly
     unwrapped_model = get_unwrapped_model(state)
     unwrapped_model.eval()
@@ -403,17 +410,20 @@ def validate(state, step, cfg, task="gsm8k"):
         fewshot_as_multiturn=True,
         system_instruction=DEFAULT_SYS_PROMPT,
         limit=100,
+        # batch_size=13,
         num_fewshot=0,
         gen_kwargs={"num_steps": unwrapped_model.config.mean_recurrence},
     )
     print(make_table(results))
-    if results is not None and "groups" in results:
-        print(make_table(results, "groups"))
-    results_store[str(step)] = results["results"][task]
+    results_by_step = {}
+    if results is not None:
+        if "groups" in results:
+            print(make_table(results, "groups"))
+        results_by_step[str(step)] = results["results"][task]
 
     os.makedirs(f"{cfg.out_path}/{cfg.run_name}", exist_ok=True)
-    with open(f"{cfg.out_path}/{cfg.run_name}/eval.json", "w") as f:
-        json.dump(results_store, f)
+    with open(f"{cfg.out_path}/{cfg.run_name}/eval.json", "a") as f:
+        json.dump(results_by_step, f)
 
     unwrapped_model.train()
 
@@ -448,11 +458,12 @@ def main():
 
     state, device = startup(cfg)
     state = train(state, device, cfg)
-    validate(state, "final", cfg)
+    # validate(state, "final", cfg)
 
-    unwrapped_model = get_unwrapped_model(state)
-    unwrapped_model.save_pretrained(f"{cfg.out_path}/{cfg.run_name}/final_checkpoint")
-    state["tokenizer"].save_pretrained(f"{cfg.out_path}/{cfg.run_name}/final_checkpoint")
+    if cfg.save_final_checkpoint:
+        unwrapped_model = get_unwrapped_model(state)
+        unwrapped_model.save_pretrained(f"{cfg.out_path}/{cfg.run_name}/final_checkpoint")
+        state["tokenizer"].save_pretrained(f"{cfg.out_path}/{cfg.run_name}/final_checkpoint")
 
     # Now exit
     if is_main_process():
