@@ -28,16 +28,16 @@ from lm_eval.utils import (
 ####### Only difference:
 ####### oh I really stopped caring about python in this part
 try:
-    import litgpt  # noqa: F401
+    import recpre  # noqa: F401
 except ModuleNotFoundError:
     try:
         wd = Path.cwd()
         sys.path.append(str(wd))
-        import litgpt  # noqa: F401
+        import recpre  # noqa: F401
     except ModuleNotFoundError:
         wd = Path.cwd().parent
         sys.path.append(str(wd))
-        import litgpt  # noqa: F401
+        import recpre  # noqa: F401
 print("""
 Use this only if you made changes to litgpt/raven_modeling.py and want to test those changes with lm-eval
 If you just want to evaluate the model, do not use this script, use lm-eval directly!
