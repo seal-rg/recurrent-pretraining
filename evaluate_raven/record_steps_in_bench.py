@@ -14,16 +14,16 @@ import sys
 
 ####### oh I really stopped caring in this part
 try:
-    import litgpt  # noqa: F401
+    import recpre  # noqa: F401
 except ModuleNotFoundError:
     try:
         wd = Path.cwd()
         sys.path.append(str(wd))
-        import litgpt  # noqa: F401
+        import recpre  # noqa: F401
     except ModuleNotFoundError:
         wd = Path.cwd().parent
         sys.path.append(str(wd))
-        import litgpt  # noqa: F401
+        import recpre  # noqa: F401
 #########################
 
 
