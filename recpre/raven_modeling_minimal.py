@@ -6,9 +6,10 @@ import math
 from torch import Tensor
 from torch.nn.attention.flex_attention import create_block_mask, BlockMask, flex_attention
 from torch.nn.attention import bias as attn_bias
+from torch.utils.checkpoint import checkpoint
 from dataclasses import dataclass
-from typing import Union, Optional, Any, Tuple, List, Callable
-
+from typing import Union, Optional, Any, Tuple, Callable, List
+from functools import cache, cached_property
 
 from .raven_config_minimal import RavenConfig
 from transformers.cache_utils import Cache, DynamicCache, StaticCache
@@ -36,9 +37,77 @@ class RavenPreTrainedModel(PreTrainedModel):
     _supports_static_cache = True
     _tp_plan = {}
 
+    @cache
+    def _init_func(self, dim, num_layers):
+        return {
+            "std": math.sqrt(2 / (5 * dim)),
+            "out_proj": math.sqrt(2 / (5 * dim)) / math.sqrt(2 * num_layers),
+            "embedding": math.sqrt(2 / (5 * dim)),
+            "embed_scale": math.sqrt(dim),
+        }
+
+    @property
+    def emb_scale(self):
+        return self._init_func(self.config.n_embd, self.config.effective_expected_depth)["embed_scale"]
+
+    def _normal_(self, tensor, std):
+        return torch.nn.init.trunc_normal_(tensor, mean=0.0, std=std, a=-3 * std, b=3 * std)
+
+    @torch.no_grad()
+    def init_qkv(self, qkv_tensor, init_fn, qk_std, v_std, dim, head_dim):
+        s = qkv_tensor.shape[0]
+        n_kv_heads = (s - dim) // (2 * head_dim)
+        shapes = [dim, n_kv_heads * head_dim, n_kv_heads * head_dim]
+
+        Q, K, V = (
+            qkv_tensor.new_empty([shapes[0], dim]),
+            qkv_tensor.new_empty([shapes[1], dim]),
+            qkv_tensor.new_empty([shapes[2], dim]),
+        )
+        init_fn(Q, qk_std)
+        init_fn(K, qk_std)
+        init_fn(V, v_std)
+        qkv_tensor.data.copy_(torch.cat([Q, K, V], dim=0).contiguous())
+
+    @torch.no_grad()
+    def init_glu(self, glu_tensor, init_fn, w1_std, w2_std):
+        g, h = glu_tensor.shape
+        W1, W2 = (
+            glu_tensor.new_empty([g // 2, h]),
+            glu_tensor.new_empty([g // 2, h]),
+        )
+        init_fn(W1, w1_std)
+        init_fn(W2, w2_std)
+        glu_tensor.data.copy_(torch.cat([W1, W2], dim=0).contiguous())
+
+    @cached_property
+    def _full_name_of_module_lookup(self):
+        return {id(m): n for n, m in self.named_modules()}
+
+    @torch.no_grad()
     def _init_weights(self, module):
-        if not torch.rand((1,)).is_meta:
-            print("Random Initialization not implemented.")
+        _init_values = self._init_func(self.config.n_embd, self.config.effective_expected_depth)
+        name = self._full_name_of_module_lookup[id(module)]
+        if isinstance(module, RMSNorm):
+            torch.nn.init.ones_(module.weight)
+        elif isinstance(module, torch.nn.Linear):
+            if "Wqkv" in name:
+                self.init_qkv(
+                    module.weight,
+                    self._normal_,
+                    float(_init_values["std"]),
+                    float(_init_values["std"]),
+                    self.config.n_embd,
+                    self.config.head_dim,
+                )
+            elif "fc" in name:
+                self.init_glu(module.weight, self._normal_, float(_init_values["std"]), float(_init_values["out_proj"]))
+            elif "mlp.proj" in name or "attn.proj" in name:
+                self._normal_(module.weight, std=float(_init_values["out_proj"]))
+            elif "adapter" in name or "lm_head" in name:
+                self._normal_(module.weight, std=float(_init_values["std"]))
+        elif isinstance(module, torch.nn.Embedding):
+            self._normal_(module.weight, std=float(_init_values["embedding"]))
 
 
 @dataclass
@@ -499,13 +568,15 @@ class RavenForCausalLM(RavenPreTrainedModel, GenerationMixin):
                 ln_f=RMSNorm(config.n_embd, eps=config.norm_eps),  # used twice :>
             )
         )
-        self.emb_scale = config.init_values["embed_scale"]
         # Head
         self.lm_head = torch.nn.Linear(config.n_embd, config.padded_vocab_size, bias=False)
         if self.config.tie_embeddings:
             self.tie_weights()
         # rope
         self.register_buffer("freqs_cis", self._precompute_freqs_cis(), persistent=True)
+        self.gradient_checkpointing = False
+        # Call weight init through HF post init:
+        self.post_init()
 
     def get_input_embeddings(self):
         return self.transformer.wte
@@ -514,11 +585,9 @@ class RavenForCausalLM(RavenPreTrainedModel, GenerationMixin):
         return self.lm_head
 
     def _precompute_freqs_cis(self):
-        # can actually be a buffer now, and remains in fp32! (at least in the settings I tested)
-        freqs_cis = precompute_freqs_cis(
+        return precompute_freqs_cis(
             self.config.n_embd // self.config.num_attention_heads, self.config.block_size, self.config.rope_base, 1
         )
-        return freqs_cis
 
     def compile_mask(
         self,
@@ -684,7 +753,7 @@ class RavenForCausalLM(RavenPreTrainedModel, GenerationMixin):
 
         for grad_step in range(num_steps_with_grad):
             xk = x
-            x, block_idx = self.core_block_forward(
+            x, block_idx = self._maybe_checkpoint_core_block(
                 xk, input_embeds, freqs_cis, mask, past_key_values, block_idx, num_steps_no_grad + grad_step
             )
         return self.transformer.ln_f(x), num_steps_no_grad, num_steps_with_grad, xk.detach(), block_idx  # type: ignore # types broken in 2.6+
@@ -699,11 +768,13 @@ class RavenForCausalLM(RavenPreTrainedModel, GenerationMixin):
         block_idx: torch.Tensor,
         current_step: int | Tensor,
     ):
+        block_idx = block_idx.detach().clone()  # line only included to convince torch.checkpointing
         x = self._maybe_inject_noise(x, current_step)
         x = self.transformer.adapter(torch.cat([x, input_embeds.to(x.device)], dim=-1))  # type: ignore # types broken in 2.6+
         for block in self.transformer.core_block:  # type: ignore # types broken in 2.6+
             block_idx += 1
             x = block(x, freqs_cis, block_idx, mask, past_key_values)
+
         return x, block_idx
 
     @torch._dynamo.disable(recursive=False)  # type: ignore
@@ -908,7 +979,7 @@ class RavenForCausalLM(RavenPreTrainedModel, GenerationMixin):
                     break
             compute_steps.append(compute_step + 1)
 
-            x = self.transformer.ln_f(current_latents)
+            x = self.transformer.ln_f(current_latents)  # type: ignore
 
             # Coda layers
             block_idx = torch.tensor(0, device=torch.device("cpu"), dtype=torch.long)  # use negative indices for head
@@ -916,7 +987,7 @@ class RavenForCausalLM(RavenPreTrainedModel, GenerationMixin):
                 block_idx -= 1
                 x = block(x, freqs_cis, block_idx, attention_mask, past_key_values)
 
-            x = self.transformer.ln_f(x)
+            x = self.transformer.ln_f(x)  # type: ignore
             logits = self.lm_head(x).float()
             output = torch.cat([output, logits], dim=1)
         return output, past_key_values, compute_steps  # type: ignore
@@ -973,6 +1044,19 @@ class RavenForCausalLM(RavenPreTrainedModel, GenerationMixin):
             "num_steps_with_grad": num_steps_with_grad,
         }
         return stats
+
+    def _maybe_checkpoint_core_block(self, *args, **kwargs) -> tuple[Tensor, Tensor]:
+        if self.gradient_checkpointing:
+            return checkpoint(
+                self.core_block_forward,
+                *args,
+                use_reentrant=False,
+                preserve_rng_state=False,
+                determinism_check="none",
+                **kwargs,
+            )  # type: ignore
+        else:
+            return self.core_block_forward(*args)
 
     """"------------------------------------------Generation Utilities from here----------------------------------"""
 
@@ -1211,7 +1295,7 @@ class RavenForCausalLM(RavenPreTrainedModel, GenerationMixin):
             compute_steps_per_seq = [0] * batch_size
             exit_reached = torch.zeros(batch_size, dtype=torch.bool, device=input_ids.device)
 
-            next_token_logits = None
+            outputs, next_token_logits = None, None
             exit_evaluator.init(current_latents)
 
             # Iterate through compute steps
@@ -1224,16 +1308,16 @@ class RavenForCausalLM(RavenPreTrainedModel, GenerationMixin):
                     current_step=compute_step,
                 )
 
-                # Skip checking exit conditions if min_steps, or check_criterion_every_n_steps or
+                # Skip checking exit conditions if min_steps not met, or not checking this step, or in prefill
                 if (
                     compute_step < min_steps
-                    or compute_step % check_criterion_every_n_steps != 0
+                    or (compute_step - min_steps) % check_criterion_every_n_steps != 0
                     or (do_not_exit_in_prefill and token_step_in_sequence == 0)
                 ):
                     continue
 
-                # Check for new exits, respecting unfinished_sequences
-                new_exits, new_logits, exit_values = exit_evaluator.check(self, current_latents, aux_inputs)
+                # Otherwise check for new exits, potentially by evaluating the coda:
+                new_exits, outputs, exit_values = exit_evaluator.check(self, current_latents, aux_inputs)
 
                 # Record values and check exits for each sequence
                 for i in range(batch_size):
@@ -1244,13 +1328,13 @@ class RavenForCausalLM(RavenPreTrainedModel, GenerationMixin):
 
                 if new_exits.any():
                     exit_reached = exit_reached | new_exits
-                    if new_logits is not None:
-                        logits = new_logits
+                    if outputs is not None:
+                        logits = outputs.logits
                     else:
-                        # Normally we don't compute the output for latent-diff, but when there is an exit,
-                        # we need to compute and save the output
+                        # For latent-based criteria, compute outputs when we need them
                         outputs = self.predict_from_latents(current_latents, **aux_inputs)
-                        logits: torch.Tensor = outputs.logits  # type: ignore
+                        logits = outputs.logits
+
                     if next_token_logits is None:
                         next_token_logits = logits[:, -1, :].to(**logit_type)  # type: ignore
                     else:
@@ -1267,22 +1351,22 @@ class RavenForCausalLM(RavenPreTrainedModel, GenerationMixin):
                 # If all sequences have exited or finished, break early
                 if (exit_reached | ~unfinished_sequences.bool()).all():
                     break
+
             # This else triggers if the for loop finishes without breaking:
             else:
-                outputs = self.predict_from_latents(current_latents, **aux_inputs)
+                if outputs is None:
+                    outputs = self.predict_from_latents(current_latents, **aux_inputs)
 
                 # For sequences that didn't exit early, use the final logits
                 if next_token_logits is None:
                     next_token_logits = outputs.logits[:, -1, :].to(**logit_type)  # type: ignore
                     for i in range(batch_size):
                         compute_steps_per_seq[i] = max_steps
-
                 else:
                     for i in range(batch_size):
                         if not exit_reached[i] and unfinished_sequences[i].bool():
                             next_token_logits[i] = outputs.logits[i, -1, :].to(**logit_type)  # type: ignore
                             compute_steps_per_seq[i] = max_steps
-
             # Save latent states for continuous compute if enabled
             if continuous_compute:
                 still_running = ~exit_reached & unfinished_sequences.bool()
@@ -1302,7 +1386,7 @@ class RavenForCausalLM(RavenPreTrainedModel, GenerationMixin):
                 streamer.put(next_token.cpu())
 
             # Update model kwargs for next iteration
-            model_kwargs = self._update_model_kwargs_for_generation(outputs, model_kwargs)
+            model_kwargs = self._update_model_kwargs_for_generation(outputs, model_kwargs)  # type: ignore
 
             # Check for stop tokens and update unfinished sequences
             for i in range(batch_size):
@@ -1606,7 +1690,7 @@ def apply_rotary_emb_complex_like(q: Tensor, k: Tensor, freqs_cis: Tensor) -> tu
 
 #################################### Adaptive Compute Exit Evaluators ##########################################
 
-Exit = Tuple[torch.Tensor, Optional[torch.Tensor], torch.Tensor]
+Exit = Tuple[torch.Tensor, Optional[CausalLMOutputRecurrentLatents], torch.Tensor]
 
 
 class PerIterationExitEvaluator:
@@ -1616,7 +1700,7 @@ class PerIterationExitEvaluator:
         """Initialize evaluator state."""
 
     def check(self, model: "RavenForCausalLM", latents: torch.Tensor, aux_inputs: dict) -> Exit:
-        """Returns (should_exit, logits (or None), exit_values)"""
+        """Returns (should_exit, outputs (or None), exit_values)"""
         raise NotImplementedError()
 
 
@@ -1648,7 +1732,7 @@ class EntropyDiffExitEvaluator(PerIterationExitEvaluator):
         entropy = -torch.sum(probs * torch.log(probs + 1e-10), dim=-1)
         exit_values = (entropy - self.prev_entropy).abs()
         self.prev_entropy = entropy
-        return exit_values < self.exit_threshold, logits, exit_values
+        return exit_values < self.exit_threshold, outputs, exit_values
 
 
 class LatentDiffExitEvaluator(PerIterationExitEvaluator):
@@ -1661,7 +1745,7 @@ class LatentDiffExitEvaluator(PerIterationExitEvaluator):
         self.prev_latents = initial_latents.clone().detach()
 
     def check(self, model: "RavenForCausalLM", latents: torch.Tensor, aux_inputs: dict) -> Exit:
-        exit_values = (latents - self.prev_latents).norm(dim=-1) / latents.norm(dim=-1)
+        exit_values = ((latents - self.prev_latents).norm(dim=-1) / latents.norm(dim=-1)).mean(dim=-1)
         self.prev_latents = latents.clone().detach()
         return exit_values < self.exit_threshold, None, exit_values
 
@@ -1680,10 +1764,10 @@ class KLExitEvaluator(PerIterationExitEvaluator):
     def check(self, model: "RavenForCausalLM", latents: torch.Tensor, aux_inputs: dict) -> Exit:
         outputs = model.predict_from_latents(latents, **aux_inputs)
         logits: torch.Tensor = outputs.logits  # type: ignore
-        log_probs = F.log_softmax(logits[:, -1, :], dim=-1)
+        log_probs = F.log_softmax(logits[:, -1, :].float(), dim=-1)
         exit_values = F.kl_div(log_probs, self.prev_log_probs, reduction="none", log_target=True).sum(dim=-1)
         self.prev_log_probs = log_probs
-        return exit_values < self.exit_threshold, logits, exit_values
+        return exit_values < self.exit_threshold, outputs, exit_values
 
 
 class MinKLExitEvaluator(PerIterationExitEvaluator):
@@ -1712,7 +1796,7 @@ class MinKLExitEvaluator(PerIterationExitEvaluator):
         log_probs = self._calc_minp_log_probs(logits)
         exit_values = F.kl_div(log_probs, self.prev_log_probs, reduction="none", log_target=True).sum(dim=-1)
         self.prev_log_probs = log_probs
-        return exit_values < self.exit_threshold, logits, exit_values
+        return exit_values < self.exit_threshold, outputs, exit_values
 
 
 class ArgmaxStabilityExitEvaluator(PerIterationExitEvaluator):
@@ -1736,7 +1820,7 @@ class ArgmaxStabilityExitEvaluator(PerIterationExitEvaluator):
         exit_values = stable_for_n_steps
         self.prev_argmax = current_argmax
         self.stable_for_n_steps = stable_for_n_steps
-        return exit_values >= self.exit_threshold, logits, exit_values
+        return exit_values >= self.exit_threshold, outputs, exit_values
 
 
 class CosineExitEvaluator(PerIterationExitEvaluator):
