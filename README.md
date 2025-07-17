@@ -45,7 +45,11 @@ HF_ALLOW_CODE_EVAL=1 accelerate launch -m lm_eval \
 --output_path=outputs/heval --confirm_run_unsafe_code \
 --apply_chat_template=True \
  --gen_kwargs=do_sample=True,temperature=0.2,top_p=0.95
-``` 
+```
+
+## Fast Inference
+
+Fast inference through vllm is now supported. See the `vllm` folder for more details. The plugin for this model can be installed into any recent vllm v1 version.
 
 ## Data
 
