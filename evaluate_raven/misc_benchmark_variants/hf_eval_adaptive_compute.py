@@ -21,13 +21,15 @@ from lm_eval.models.huggingface import HFLM
 
 
 from recpre.raven_modeling_minimal import RavenForCausalLM, CausalLMOutputRecurrentLatents
-from recpre.raven_modeling_minimal import PerLoopExitEvaluator, PredeterminedExitEvaluator
+from recpre.raven_modeling_minimal import PerIterationExitEvaluator
 from evaluate_raven.quick_checkpoint_eval import prepare_results
 
 
 def update_huggingface_implementation(model):
     """This function selectively updates function implementations in the huggingface model."""
     import types
+    
+    # NOTE: edit this as needed in regards to your local changes to the model
 
     # for name, module in model.named_modules():
     #     if module.__class__.__name__ == "CausalSelfAttention":
@@ -36,7 +38,9 @@ def update_huggingface_implementation(model):
     model.generate_with_adaptive_compute = types.MethodType(RavenForCausalLM.generate_with_adaptive_compute, model)
     model.forward = types.MethodType(RavenForCausalLM.forward, model)
     model.forward_with_adaptive_compute = types.MethodType(RavenForCausalLM.forward_with_adaptive_compute, model)
-    model.prefill_with_varied_exit_steps = types.MethodType(RavenForCausalLM.prefill_with_varied_exit_steps, model)
+    model._prefill_with_varied_exit_steps = types.MethodType(RavenForCausalLM._prefill_with_varied_exit_steps, model)
+    model._prep_generate_args = types.MethodType(RavenForCausalLM._prep_generate_args, model)
+    model.prepare_inputs_for_generation = types.MethodType(RavenForCausalLM.prepare_inputs_for_generation, model)
 
 
 class HuginnWrapper(HFLM):
@@ -47,11 +51,12 @@ class HuginnWrapper(HFLM):
         pretrained: Union[str, transformers.PreTrainedModel],
         *,
         backend: Literal["default", "causal", "seq2seq"] = "default",
-        criterion: Optional[Literal["entropy-diff", "latent-diff", "minp-kl", "argmax-stability"]] = "entropy-diff",
+        criterion: Optional[Literal["entropy-diff", "latent-diff", "minp-kl", "argmax-stability", "none"]] = "entropy-diff",
         exit_threshold: Optional[Union[str, float, int]] = "auto",
         lookup_strategy: str = "full",
         continuous_compute: bool = False,
-        exit_evaluator: Optional[PerLoopExitEvaluator | PredeterminedExitEvaluator] = None,
+        exit_evaluator: Optional[PerIterationExitEvaluator] = None,
+        prefill_with_varied_exit_steps: bool = False,
         # override whether the model should be treated as decoder-only (causal) or encoder-decoder (seq2seq)
         revision: Optional[str] = "main",
         subfolder: Optional[str] = None,
@@ -118,6 +123,7 @@ class HuginnWrapper(HFLM):
         self.lookup_strategy = lookup_strategy
         self.continuous_compute = continuous_compute
         self.exit_evaluator = exit_evaluator
+        self.prefill_with_varied_exit_steps = prefill_with_varied_exit_steps
         update_huggingface_implementation(self.model)
         self.compute_steps = []
 
@@ -141,6 +147,7 @@ class HuginnWrapper(HFLM):
             cache_kwargs={"lookup_strategy": self.lookup_strategy},
             continuous_compute=self.continuous_compute,
             exit_evaluator=self.exit_evaluator,
+            prefill_with_varied_exit_steps=self.prefill_with_varied_exit_steps,
             **generation_kwargs,
         )
         # Capture compute_steps if available
@@ -197,14 +204,16 @@ def evaluate_single_task(
     batch_size=16,
     num_fewshot=5,
     limit=None,
-    criterion: Optional[Literal["entropy-diff", "latent-diff", "minp-kl", "argmax-stability"]] = "entropy-diff",
+    criterion: Optional[Literal["entropy-diff", "latent-diff", "minp-kl", "argmax-stability", "none"]] = "entropy-diff",
     exit_threshold: Optional[Union[str, float, int]] = "auto",
     num_steps=32,
     lookup_strategy="full",
-    exit_evaluator: Optional[PerLoopExitEvaluator | PredeterminedExitEvaluator] = None,
+    exit_evaluator: Optional[PerIterationExitEvaluator] = None,
     continuous_compute=False,
+    max_length=2048,
     output_filepath: Optional[str] = None,
     system_instruction: Optional[str] = None,
+    prefill_with_varied_exit_steps: bool = False,
 ):
     model_name = model if isinstance(model, str) else "custom_model"
     config_args = {
@@ -212,6 +221,7 @@ def evaluate_single_task(
         "model_name": model_name,
         "device": device,
         "batch_size": batch_size,
+        "max_length": max_length,
         "num_fewshot": num_fewshot,
         "limit": limit,
         "criterion": criterion,
@@ -220,6 +230,7 @@ def evaluate_single_task(
         "lookup_strategy": lookup_strategy,
         "system_instruction": system_instruction,
         "exit_evaluator": exit_evaluator.__class__.__name__ if exit_evaluator is not None else None,
+        "prefill_with_varied_exit_steps": prefill_with_varied_exit_steps,
     }
 
     print(f"Evaluating {model_name} on {task_name} with config: {config_args}")
@@ -227,6 +238,7 @@ def evaluate_single_task(
         pretrained=model,
         device=device,
         batch_size=batch_size,
+        max_length=max_length,
         trust_remote_code=True,
         dtype="bfloat16",
         criterion=criterion,
@@ -234,6 +246,7 @@ def evaluate_single_task(
         lookup_strategy=lookup_strategy,
         continuous_compute=continuous_compute,
         exit_evaluator=exit_evaluator,
+        prefill_with_varied_exit_steps=prefill_with_varied_exit_steps,
     )
     results = evaluator.simple_evaluate(
         model=model_wrapper,
@@ -266,7 +279,8 @@ if __name__ == "__main__":
         "--model-name", dest="model_name", type=str, default="tomg-group-umd/huginn-0125", help="Model to evaluate"
     )
     parser.add_argument("--device", type=str, default="cuda", help="Device to run on (cuda, cpu)")
-    parser.add_argument("--batch-size", dest="batch_size", type=int, default=16, help="Batch size for evaluation")
+    parser.add_argument("--batch-size", dest="batch_size", type=int, default=1, help="Batch size for evaluation")
+    parser.add_argument("--max-length", dest="max_length", type=int, default=2048, help="Max length for generation")
     parser.add_argument("--num-fewshot", dest="num_fewshot", type=int, default=5, help="Number of few-shot examples")
     parser.add_argument("--limit", type=int, default=None, help="Limit number of examples to evaluate")
     parser.add_argument(
@@ -298,11 +312,15 @@ if __name__ == "__main__":
         "--system-instruction", dest="system_instruction", type=str, default=None, help="System instruction"
     )
     parser.add_argument("--output-filepath", dest="output_filepath", type=str, default=None, help="Output filepath")
+    parser.add_argument(
+        "--prefill-with-varied-exit-steps",
+        dest="prefill_with_varied_exit_steps",
+        type=bool,
+        default=False,
+        help="Prefill with varied exit steps",
+    )
 
     args = parser.parse_args()
-
-    # Convert 'none' to None for criterion
-    criterion = None if args.criterion == "none" else args.criterion
 
     # Try to convert exit_threshold to float if it's numeric
     exit_threshold = None if args.exit_threshold == "none" else args.exit_threshold
@@ -315,13 +333,15 @@ if __name__ == "__main__":
         model=args.model_name,
         device=args.device,
         batch_size=args.batch_size,
+        max_length=args.max_length,
         num_fewshot=args.num_fewshot,
         limit=args.limit,
-        criterion=criterion,
+        criterion=args.criterion,
         exit_threshold=exit_threshold,
         num_steps=args.num_steps,
         lookup_strategy=args.lookup_strategy,
         continuous_compute=args.continuous_compute,
         system_instruction=args.system_instruction,
         output_filepath=args.output_filepath,
+        prefill_with_varied_exit_steps=args.prefill_with_varied_exit_steps,
     )
