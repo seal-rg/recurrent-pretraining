@@ -8,6 +8,7 @@ from torch.nn.attention.flex_attention import create_block_mask, BlockMask, flex
 from torch.nn.attention import bias as attn_bias
 from torch.utils.checkpoint import checkpoint
 from dataclasses import dataclass
+from enum import Enum
 from typing import Union, Optional, Any, Tuple, Callable, List
 from functools import cache, cached_property
 from packaging import version
@@ -1883,27 +1884,40 @@ class NumStepsGenerator(PerIterationExitEvaluator):
         )
 
 
+class SupportedExitCriteria(Enum):
+    ENTROPY_DIFF = "entropy-diff"
+    LATENT_DIFF = "latent-diff"
+    COSINE = "cosine"
+    MINP_KL = "minp-kl"
+    KL = "kl"
+    ARGMAX_STABILITY = "argmax-stability"
+    NONE = "none"
+
 def get_adaptive_exit_evaluator(
     model: "RavenForCausalLM", criterion: str, exit_threshold: Union[str, float, int]
 ) -> PerIterationExitEvaluator:
     """Factory function to create appropriate exit evaluator."""
-    if criterion == "entropy-diff":
+    try:
+        criterion_enum = SupportedExitCriteria(criterion)
+    except ValueError:
+        raise ValueError(f"Invalid adaptive compute strategy: {criterion}")
+
+    if criterion_enum == SupportedExitCriteria.ENTROPY_DIFF:
         return EntropyDiffExitEvaluator(exit_threshold)
-    elif criterion == "latent-diff":
+    elif criterion_enum == SupportedExitCriteria.LATENT_DIFF:
         return LatentDiffExitEvaluator(exit_threshold)
-    elif criterion == "cosine":
+    elif criterion_enum == SupportedExitCriteria.COSINE:
         return CosineExitEvaluator(exit_threshold)
-    elif "kl" in criterion:
-        if criterion == "minp-kl":
-            return MinKLExitEvaluator(model, exit_threshold)
-        else:
-            return KLExitEvaluator(model, exit_threshold)
-    elif criterion == "argmax-stability":
+    elif criterion_enum == SupportedExitCriteria.MINP_KL:
+        return MinKLExitEvaluator(model, exit_threshold)
+    elif criterion_enum == SupportedExitCriteria.KL:
+        return KLExitEvaluator(model, exit_threshold)
+    elif criterion_enum == SupportedExitCriteria.ARGMAX_STABILITY:
         return ArgmaxStabilityExitEvaluator(exit_threshold)  # type: ignore
-    elif criterion == "none":
+    elif criterion_enum == SupportedExitCriteria.NONE:
         return NoOpExitEvaluator()
     else:
-        raise ValueError(f"Invalid adaptive compute strategy: {criterion}")
+        raise NotImplementedError(f"Forgot to add {criterion_enum} to get_adaptive_exit_evaluator")
 
 
 #################################### HF registration ############################################################
