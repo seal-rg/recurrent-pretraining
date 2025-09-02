@@ -17,7 +17,7 @@ If you don't want to wait for the graph capture and compilation, you can also en
 The main usecase for this to to enable faster evals. A more involved `lm-eval` example is
 ```
 lm_eval --model vllm   --model_args 'pretrained=tomg-group-umd/huginn-0125,trust_remote_code=True,dtype=bfloat16,tensor_parallel_size=1,dtype=bfloat16,gpu_memory_utilization=0.8,data_parallel_size=1,hf_overrides={"mean_recurrence" : 32}' \
-  --tasks gsm8k_cot   --batch_size auto   --num_fewshot 0   --output_path outputs/vllm   --apply_chat_template   \
+  --tasks gsm8k_cot   --batch_size auto   --num_fewshot 8   --output_path outputs/vllm   --apply_chat_template   \
   --system_instruction "You are a helpful assistant that can assist users with mathematical reasoning." \
   --fewshot_as_multiturn
 ```
