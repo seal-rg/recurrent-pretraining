@@ -339,7 +339,7 @@ def train(state, device, cfg):
             # Need to take into account the assistant and attention if sequences are being padded
             mask = ~(inputs["mask"].bool() & inputs["attention_mask"].bool())
 
-            labels = torch.where(mask[:, :-1], -100, inputs[cfg.token_id_col_name][:, 1:]).to(
+            labels = torch.where(mask[:, 1:], -100, inputs[cfg.token_id_col_name][:, 1:]).to(
                 dtype=torch.long, device=device, non_blocking=True
             )
             total_tokens_with_loss += (labels != -100).sum().item()
