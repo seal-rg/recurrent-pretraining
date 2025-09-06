@@ -2,6 +2,7 @@
 you should probably just use lm-eval.
 """
 
+from datetime import datetime
 from pathlib import Path
 from typing import Literal, Optional, Union
 import os
@@ -21,13 +22,15 @@ from lm_eval.models.huggingface import HFLM
 
 
 from recpre.raven_modeling_minimal import RavenForCausalLM, CausalLMOutputRecurrentLatents
-from recpre.raven_modeling_minimal import PerLoopExitEvaluator, PredeterminedExitEvaluator
+from recpre.raven_modeling_minimal import PerIterationExitEvaluator, SupportedExitCriteria
 from evaluate_raven.quick_checkpoint_eval import prepare_results
 
 
 def update_huggingface_implementation(model):
     """This function selectively updates function implementations in the huggingface model."""
     import types
+    
+    # NOTE: edit this as needed in regards to your local changes to the model
 
     # for name, module in model.named_modules():
     #     if module.__class__.__name__ == "CausalSelfAttention":
@@ -36,7 +39,9 @@ def update_huggingface_implementation(model):
     model.generate_with_adaptive_compute = types.MethodType(RavenForCausalLM.generate_with_adaptive_compute, model)
     model.forward = types.MethodType(RavenForCausalLM.forward, model)
     model.forward_with_adaptive_compute = types.MethodType(RavenForCausalLM.forward_with_adaptive_compute, model)
-    model.prefill_with_varied_exit_steps = types.MethodType(RavenForCausalLM.prefill_with_varied_exit_steps, model)
+    model._prefill_with_varied_exit_steps = types.MethodType(RavenForCausalLM._prefill_with_varied_exit_steps, model)
+    model._prep_generate_args = types.MethodType(RavenForCausalLM._prep_generate_args, model)
+    model.prepare_inputs_for_generation = types.MethodType(RavenForCausalLM.prepare_inputs_for_generation, model)
 
 
 class HuginnWrapper(HFLM):
@@ -47,11 +52,11 @@ class HuginnWrapper(HFLM):
         pretrained: Union[str, transformers.PreTrainedModel],
         *,
         backend: Literal["default", "causal", "seq2seq"] = "default",
-        criterion: Optional[Literal["entropy-diff", "latent-diff", "minp-kl", "argmax-stability"]] = "entropy-diff",
-        exit_threshold: Optional[Union[str, float, int]] = "auto",
-        lookup_strategy: str = "full",
+        criterion: Literal["entropy-diff", "latent-diff", "cosine", "minp-kl", "kl", "argmax-stability", "none"] = "entropy-diff",
+        exit_threshold: Union[str, float, int] = "auto",
         continuous_compute: bool = False,
-        exit_evaluator: Optional[PerLoopExitEvaluator | PredeterminedExitEvaluator] = None,
+        exit_evaluator: Optional[PerIterationExitEvaluator] = None,
+        prefill_with_varied_exit_steps: bool = False,
         # override whether the model should be treated as decoder-only (causal) or encoder-decoder (seq2seq)
         revision: Optional[str] = "main",
         subfolder: Optional[str] = None,
@@ -115,9 +120,9 @@ class HuginnWrapper(HFLM):
         )
         self.criterion = criterion
         self.exit_threshold = exit_threshold
-        self.lookup_strategy = lookup_strategy
         self.continuous_compute = continuous_compute
         self.exit_evaluator = exit_evaluator
+        self.prefill_with_varied_exit_steps = prefill_with_varied_exit_steps
         update_huggingface_implementation(self.model)
         self.compute_steps = []
 
@@ -131,18 +136,28 @@ class HuginnWrapper(HFLM):
             pad_token_id=self.tokenizer.pad_token_id,
             return_dict_in_generate=True,
         )
-        output = super()._model_generate(
-            context,
-            max_length,
-            stop,
-            generation_config=generation_config,
-            criterion=self.criterion,
-            exit_threshold=self.exit_threshold,
-            cache_kwargs={"lookup_strategy": self.lookup_strategy},
-            continuous_compute=self.continuous_compute,
-            exit_evaluator=self.exit_evaluator,
-            **generation_kwargs,
-        )
+        if (self.criterion == SupportedExitCriteria.NONE.value or self.exit_threshold == "none") and self.exit_evaluator is None:
+            output = super()._model_generate(
+                context,
+                max_length,
+                stop,
+                generation_config=generation_config,
+                continuous_compute=self.continuous_compute,
+                **generation_kwargs,
+            )
+        else:
+            output = super()._model_generate(
+                context,
+                max_length,
+                stop,
+                generation_config=generation_config,
+                criterion=self.criterion,
+                exit_threshold=self.exit_threshold,
+                continuous_compute=self.continuous_compute,
+                exit_evaluator=self.exit_evaluator,
+                prefill_with_varied_exit_steps=self.prefill_with_varied_exit_steps,
+                **generation_kwargs,
+            )
         # Capture compute_steps if available
         if isinstance(output, GenerateDecoderOnlyOutput):
             compute_steps = [[] for _ in range(self.batch_size)]  # type: ignore
@@ -190,58 +205,68 @@ class HuginnWrapper(HFLM):
             return output.logits
 
 
-def evaluate_single_task(
-    task_name="gsm8k",
+def evaluate_tasks(
+    tasks = ["gsm8k"],
     model: Union[str, RavenForCausalLM] = "tomg-group-umd/huginn-0125",
     device="cuda",
-    batch_size=16,
+    batch_size=1,
     num_fewshot=5,
     limit=None,
-    criterion: Optional[Literal["entropy-diff", "latent-diff", "minp-kl", "argmax-stability"]] = "entropy-diff",
-    exit_threshold: Optional[Union[str, float, int]] = "auto",
+    criterion: Literal["entropy-diff", "latent-diff", "minp-kl", "argmax-stability", "none"] = "entropy-diff",
+    exit_threshold: Union[str, float, int] = "auto",
     num_steps=32,
     lookup_strategy="full",
-    exit_evaluator: Optional[PerLoopExitEvaluator | PredeterminedExitEvaluator] = None,
+    exit_evaluator: Optional[PerIterationExitEvaluator] = None,
     continuous_compute=False,
-    output_filepath: Optional[str] = None,
-    system_instruction: Optional[str] = None,
+    max_length=2048,
+    output_path: Optional[str] = None,
+    prefill_with_varied_exit_steps: bool = False,
+    gen_kwargs: Optional[str] = "",
+    **kwargs,
 ):
     model_name = model if isinstance(model, str) else "custom_model"
+    if gen_kwargs is None:
+        gen_kwargs = ""
+
     config_args = {
-        "task_name": task_name,
+        "tasks": tasks,
         "model_name": model_name,
         "device": device,
         "batch_size": batch_size,
+        "max_length": max_length,
         "num_fewshot": num_fewshot,
         "limit": limit,
         "criterion": criterion,
         "exit_threshold": exit_threshold,
         "num_steps": num_steps,
         "lookup_strategy": lookup_strategy,
-        "system_instruction": system_instruction,
         "exit_evaluator": exit_evaluator.__class__.__name__ if exit_evaluator is not None else None,
+        "prefill_with_varied_exit_steps": prefill_with_varied_exit_steps,
+        "gen_kwargs": gen_kwargs,
+        **kwargs,
     }
 
-    print(f"Evaluating {model_name} on {task_name} with config: {config_args}")
+    print(f"Evaluating {model_name} on {tasks} with config: {config_args}")
     model_wrapper = HuginnWrapper(
         pretrained=model,
         device=device,
         batch_size=batch_size,
+        max_length=max_length,
         trust_remote_code=True,
         dtype="bfloat16",
         criterion=criterion,
         exit_threshold=exit_threshold,
-        lookup_strategy=lookup_strategy,
         continuous_compute=continuous_compute,
         exit_evaluator=exit_evaluator,
+        prefill_with_varied_exit_steps=prefill_with_varied_exit_steps,
     )
     results = evaluator.simple_evaluate(
         model=model_wrapper,
-        tasks=[task_name],
+        tasks=tasks,
         num_fewshot=num_fewshot,
         limit=limit,
-        system_instruction=system_instruction,
-        gen_kwargs=f"num_steps={num_steps}",
+        gen_kwargs=f"num_steps={num_steps},cache_lookup_strategy={lookup_strategy}," + gen_kwargs,
+        **kwargs,
     )
 
     if results is not None:
@@ -250,78 +275,91 @@ def evaluate_single_task(
         if hasattr(model_wrapper, "compute_steps") and model_wrapper.compute_steps:
             results["compute_steps"] = model_wrapper.compute_steps
 
-        if output_filepath is not None:
-            prepare_results(results, Path(output_filepath))
-        else:
-            prepare_results(results, Path(f"{task_name}_results.json"))
+        now = datetime.now()
+        timestamp = now.strftime("%Y-%m-%dT%H-%M-%S.%f")
+        model_pathname = model_name.replace("/", "__")
+        directory_path = Path(output_path, model_pathname) if output_path is not None else Path(model_pathname)
+        os.makedirs(directory_path, exist_ok=True)
+        prepare_results(results, Path(directory_path, f"hf_eval_results_{timestamp}.json"))
     return results
 
 
 if __name__ == "__main__":
     import argparse
+    from lm_eval.__main__ import setup_parser
+    parser: argparse.ArgumentParser = setup_parser()
+    parser.description = "lm_eval wrapper for evaluating Huginn on a task with adaptive compute."
 
-    parser = argparse.ArgumentParser(description="Evaluate a model on a task with adaptive compute.")
-    parser.add_argument("--task-name", dest="task_name", type=str, default="gsm8k", help="Task to evaluate on")
-    parser.add_argument(
-        "--model-name", dest="model_name", type=str, default="tomg-group-umd/huginn-0125", help="Model to evaluate"
-    )
-    parser.add_argument("--device", type=str, default="cuda", help="Device to run on (cuda, cpu)")
-    parser.add_argument("--batch-size", dest="batch_size", type=int, default=16, help="Batch size for evaluation")
-    parser.add_argument("--num-fewshot", dest="num_fewshot", type=int, default=5, help="Number of few-shot examples")
-    parser.add_argument("--limit", type=int, default=None, help="Limit number of examples to evaluate")
+    # drop args that are not supported by our script
+    drop_args = [("model", "m"), ("model_args", "a"), "show_config", "include_path", "wandb_args", "hf_hub_log_args", "trust_remote_code"]
+    for drop_arg in drop_args:
+        if isinstance(drop_arg, tuple):
+            drop_arg, drop_arg_short = drop_arg
+        else:
+            drop_arg_short = None
+        parser._remove_action(parser._option_string_actions[f"--{drop_arg}"])
+        parser._option_string_actions.pop(f"--{drop_arg}")
+        if drop_arg_short is not None:
+            parser._option_string_actions.pop(f"-{drop_arg_short}")
+
     parser.add_argument(
         "--criterion",
         type=str,
-        default="entropy-diff",
-        choices=["entropy-diff", "latent-diff", "minp-kl", "argmax-stability", "none"],
+        default=SupportedExitCriteria.ENTROPY_DIFF.value,
+        choices=[c.value for c in SupportedExitCriteria],
         help="Criterion for adaptive compute. Pass `none` to disable adaptive compute.",
     )
     parser.add_argument(
-        "--exit-threshold",
-        dest="exit_threshold",
+        "--exit_threshold",
         type=str,
         default="auto",
         help="Exit threshold for adaptive compute. Pass `none` to disable adaptive compute.",
     )
-    parser.add_argument("--num-steps", dest="num_steps", type=int, default=32, help="Number of steps for generation")
+    parser.add_argument("--num_steps", type=int, default=32, help="Number of steps for generation")
     parser.add_argument(
-        "--lookup-strategy",
-        dest="lookup_strategy",
+        "--lookup_strategy",
         type=str,
         default="full",
         help="Lookup strategy for caching, also supports values like `compression-s4`",
     )
     parser.add_argument(
-        "--continuous-compute", dest="continuous_compute", type=bool, default=False, help="Continuous compute"
+        "--continuous_compute", type=bool, default=False, help="Continuous compute"
     )
+    parser.add_argument("--prefill_with_varied_exit_steps", type=bool, default=False, help="Prefill with varied exit steps")
+
+    # remove log_samples and re-register it with a different default value
+    parser._remove_action(parser._option_string_actions["--log_samples"])
+    parser._option_string_actions.pop("--log_samples")
+    parser._option_string_actions.pop("-s")
     parser.add_argument(
-        "--system-instruction", dest="system_instruction", type=str, default=None, help="System instruction"
+        "--log_samples",
+        "-s",
+        action="store_true",
+        default=True,
+        help="If True, write out all model outputs and documents for per-sample measurement and post-hoc analysis.",
     )
-    parser.add_argument("--output-filepath", dest="output_filepath", type=str, default=None, help="Output filepath")
 
     args = parser.parse_args()
 
-    # Convert 'none' to None for criterion
-    criterion = None if args.criterion == "none" else args.criterion
+    if args.batch_size != 1 and args.criterion != SupportedExitCriteria.NONE.value:
+        print(f"WARNING: please run adaptive compute with batch_size=1 if accurate results are desired.")
 
     # Try to convert exit_threshold to float if it's numeric
-    exit_threshold = None if args.exit_threshold == "none" else args.exit_threshold
-    if exit_threshold != "auto" and exit_threshold is not None:
+    if args.exit_threshold != "auto" and args.exit_threshold != "none":
         with contextlib.suppress(ValueError):
-            exit_threshold = float(exit_threshold)  # Keep as string if not convertible to float
+            args.exit_threshold = float(args.exit_threshold)  # Keep as string if not convertible to float
 
-    results = evaluate_single_task(
-        task_name=args.task_name,
-        model=args.model_name,
-        device=args.device,
-        batch_size=args.batch_size,
-        num_fewshot=args.num_fewshot,
-        limit=args.limit,
-        criterion=criterion,
-        exit_threshold=exit_threshold,
-        num_steps=args.num_steps,
-        lookup_strategy=args.lookup_strategy,
-        continuous_compute=args.continuous_compute,
-        system_instruction=args.system_instruction,
-        output_filepath=args.output_filepath,
+    if args.device is None:
+        args.device = "cuda" if torch.cuda.is_available() else "cpu"
+
+    seeds = args.seed
+    delattr(args, "seed")
+
+    results = evaluate_tasks(
+        model="tomg-group-umd/huginn-0125",
+        random_seed=seeds[0],
+        numpy_random_seed=seeds[1],
+        torch_random_seed=seeds[2],
+        fewshot_random_seed=seeds[3],
+        **vars(args)
     )

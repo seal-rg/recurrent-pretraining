@@ -8,8 +8,11 @@ from torch.nn.attention.flex_attention import create_block_mask, BlockMask, flex
 from torch.nn.attention import bias as attn_bias
 from torch.utils.checkpoint import checkpoint
 from dataclasses import dataclass
+from enum import Enum
 from typing import Union, Optional, Any, Tuple, Callable, List
 from functools import cache, cached_property
+from packaging import version
+import transformers
 
 from .raven_config_minimal import RavenConfig
 from transformers.cache_utils import Cache, DynamicCache, StaticCache
@@ -1152,7 +1155,10 @@ class RavenForCausalLM(RavenPreTrainedModel, GenerationMixin):
                 lookup_strategy=cache_lookup_strategy,
             )
         model_kwargs["use_cache"] = True
-        model_kwargs = self._get_initial_cache_position(input_ids.shape[1], input_ids.device, model_kwargs)
+        if version.parse(transformers.__version__) < version.parse("4.52.0"):
+            model_kwargs = self._get_initial_cache_position(input_ids, model_kwargs)
+        else:
+            model_kwargs = self._get_initial_cache_position(input_ids.shape[1], input_ids.device, model_kwargs)
         return model_kwargs, generation_config, max_new_tokens
 
     @torch.no_grad()
@@ -1240,6 +1246,7 @@ class RavenForCausalLM(RavenPreTrainedModel, GenerationMixin):
         min_steps: int = 0,
         check_criterion_every_n_steps=1,
         exit_evaluator: "Optional[PerIterationExitEvaluator]" = None,  # optional plugin of a new exit eval object
+        prefill_with_varied_exit_steps: bool = False,
         **model_kwargs,
     ) -> Union[torch.Tensor, GenerateDecoderOnlyOutput]:
         """
@@ -1271,6 +1278,20 @@ class RavenForCausalLM(RavenPreTrainedModel, GenerationMixin):
 
         if exit_evaluator is None:
             exit_evaluator = get_adaptive_exit_evaluator(self, criterion, exit_threshold)
+
+        if prefill_with_varied_exit_steps:
+            model_inputs = self.prepare_inputs_for_generation(input_ids, **model_kwargs)
+            output_logits, model_kwargs["past_key_values"], _ = self._prefill_with_varied_exit_steps(model_inputs["input_ids"], exit_evaluator, model_kwargs["past_key_values"], init_scale)
+            next_token_logits = output_logits[:, -1, :].to(**logit_type)  # type: ignore
+            next_token = self._sample_next_token(next_token_logits, generation_config)
+            input_ids = torch.cat([input_ids, next_token], dim=-1)
+            model_kwargs = self._update_model_kwargs_for_generation(
+                CausalLMOutputRecurrentLatents(
+                    past_key_values=model_kwargs["past_key_values"],
+                ),
+                model_kwargs,
+            )
+            max_new_tokens -= 1
 
         # Generate tokens
         for token_step_in_sequence in range(max_new_tokens):
@@ -1863,27 +1884,40 @@ class NumStepsGenerator(PerIterationExitEvaluator):
         )
 
 
+class SupportedExitCriteria(Enum):
+    ENTROPY_DIFF = "entropy-diff"
+    LATENT_DIFF = "latent-diff"
+    COSINE = "cosine"
+    MINP_KL = "minp-kl"
+    KL = "kl"
+    ARGMAX_STABILITY = "argmax-stability"
+    NONE = "none"
+
 def get_adaptive_exit_evaluator(
     model: "RavenForCausalLM", criterion: str, exit_threshold: Union[str, float, int]
 ) -> PerIterationExitEvaluator:
     """Factory function to create appropriate exit evaluator."""
-    if criterion == "entropy-diff":
+    try:
+        criterion_enum = SupportedExitCriteria(criterion)
+    except ValueError:
+        raise ValueError(f"Invalid adaptive compute strategy: {criterion}")
+
+    if criterion_enum == SupportedExitCriteria.ENTROPY_DIFF:
         return EntropyDiffExitEvaluator(exit_threshold)
-    elif criterion == "latent-diff":
+    elif criterion_enum == SupportedExitCriteria.LATENT_DIFF:
         return LatentDiffExitEvaluator(exit_threshold)
-    elif criterion == "cosine":
+    elif criterion_enum == SupportedExitCriteria.COSINE:
         return CosineExitEvaluator(exit_threshold)
-    elif "kl" in criterion:
-        if criterion == "minp-kl":
-            return MinKLExitEvaluator(model, exit_threshold)
-        else:
-            return KLExitEvaluator(model, exit_threshold)
-    elif criterion == "argmax-stability":
+    elif criterion_enum == SupportedExitCriteria.MINP_KL:
+        return MinKLExitEvaluator(model, exit_threshold)
+    elif criterion_enum == SupportedExitCriteria.KL:
+        return KLExitEvaluator(model, exit_threshold)
+    elif criterion_enum == SupportedExitCriteria.ARGMAX_STABILITY:
         return ArgmaxStabilityExitEvaluator(exit_threshold)  # type: ignore
-    elif criterion == "none":
+    elif criterion_enum == SupportedExitCriteria.NONE:
         return NoOpExitEvaluator()
     else:
-        raise ValueError(f"Invalid adaptive compute strategy: {criterion}")
+        raise NotImplementedError(f"Forgot to add {criterion_enum} to get_adaptive_exit_evaluator")
 
 
 #################################### HF registration ############################################################

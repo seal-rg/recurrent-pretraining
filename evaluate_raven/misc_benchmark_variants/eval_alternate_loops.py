@@ -4,7 +4,7 @@ import sys
 # Add the parent directory to the Python path to make recpre importable
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
-from evaluate_raven.hf_eval_adaptive_compute import evaluate_single_task
+from evaluate_raven.misc_benchmark_variants.hf_eval_adaptive_compute import evaluate_tasks
 from recpre.raven_modeling_minimal import NumStepsGenerator
 
 
@@ -16,7 +16,7 @@ if __name__ == "__main__":
     batch_size = 1
     max_steps = 8
 
-    evaluate_single_task(
+    evaluate_tasks(
         task_name=task,
         batch_size=batch_size,
         num_steps=max_steps,
