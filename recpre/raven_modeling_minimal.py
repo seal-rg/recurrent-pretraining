@@ -23,6 +23,16 @@ import torch.nn.functional as F
 from transformers import GenerationConfig
 
 
+@cache
+def _init_func(dim, num_layers) -> dict[str, float]:
+    return {
+        "std": math.sqrt(2 / (5 * dim)),
+        "out_proj": math.sqrt(2 / (5 * dim)) / math.sqrt(2 * num_layers),
+        "embedding": math.sqrt(2 / (5 * dim)),
+        "embed_scale": math.sqrt(dim),
+    }
+
+
 class RavenPreTrainedModel(PreTrainedModel):
     config_class = RavenConfig
     base_model_prefix = "model"
@@ -37,18 +47,9 @@ class RavenPreTrainedModel(PreTrainedModel):
     _supports_static_cache = True
     _tp_plan = {}
 
-    @cache
-    def _init_func(self, dim, num_layers):
-        return {
-            "std": math.sqrt(2 / (5 * dim)),
-            "out_proj": math.sqrt(2 / (5 * dim)) / math.sqrt(2 * num_layers),
-            "embedding": math.sqrt(2 / (5 * dim)),
-            "embed_scale": math.sqrt(dim),
-        }
-
     @property
     def emb_scale(self):
-        return self._init_func(self.config.n_embd, self.config.effective_expected_depth)["embed_scale"]
+        return _init_func(self.config.n_embd, self.config.effective_expected_depth)["embed_scale"]
 
     def _normal_(self, tensor, std):
         return torch.nn.init.trunc_normal_(tensor, mean=0.0, std=std, a=-3 * std, b=3 * std)
@@ -86,7 +87,7 @@ class RavenPreTrainedModel(PreTrainedModel):
 
     @torch.no_grad()
     def _init_weights(self, module):
-        _init_values = self._init_func(self.config.n_embd, self.config.effective_expected_depth)
+        _init_values = _init_func(self.config.n_embd, self.config.effective_expected_depth)
         name = self._full_name_of_module_lookup[id(module)]
         if isinstance(module, RMSNorm):
             torch.nn.init.ones_(module.weight)
@@ -612,15 +613,17 @@ class RavenForCausalLM(RavenPreTrainedModel, GenerationMixin):
         if attention_mask is None:
 
             def mask_mod(b, h, q_idx, kv_idx):
-                return q_idx >= kv_idx & (input_ids[b, kv_idx] != pad_token_id)
+                return (q_idx >= kv_idx) & (input_ids[b, kv_idx] != pad_token_id)
         else:
 
             def mask_mod(b, h, q_idx, kv_idx):
-                return (q_idx >= kv_idx) & (input_ids[b, kv_idx] != pad_token_id) & attention_mask[b, q_idx, kv_idx]
+                return (q_idx >= kv_idx) & (input_ids[b, kv_idx] != pad_token_id) & (attention_mask[b, q_idx, kv_idx])
 
         kv_length = past_key_values.get_seq_length() if past_key_values is not None else seq_len
         if kv_length == 0:
             kv_length = seq_len  # prefill
+
+        # pass actual device (not string)
         block_mask = create_block_mask(
             mask_mod,
             B=batch_size,
@@ -703,14 +706,14 @@ class RavenForCausalLM(RavenPreTrainedModel, GenerationMixin):
             loss = torch.nn.functional.cross_entropy(
                 logits.view(-1, logits.shape[-1]), labels.view(-1), ignore_index=-100
             )
-            log_ppl = loss.clone().detach().exp()
+            log_ppl = loss.clone().detach()
         else:
             logits = self.lm_head(x).float()
             loss, log_ppl = torch.as_tensor(0.0), torch.as_tensor(0.0)
 
         return CausalLMOutputRecurrentLatents(
             loss=loss,
-            log_ppl=log_ppl,
+            log_ppl=log_ppl,  # this value is returned only for compatibility reasons. For this model loss=log-ppl
             logits=logits if output_details["return_logits"] else None,
             past_key_values=past_key_values,
             hidden_states=x if output_details["return_head"] else None,
@@ -915,7 +918,7 @@ class RavenForCausalLM(RavenPreTrainedModel, GenerationMixin):
             freqs_cis = self.freqs_cis[:, cache_position]
 
         input_embeds = self.transformer.wte(input_ids)  # type: ignore # types broken in 2.6+
-        prepared_attn_mask = self.compile_mask(input_ids, attention_mask)
+        prepared_attn_mask = None  # self.compile_mask(input_ids, attention_mask)
 
         if self.emb_scale != 1:
             input_embeds = input_embeds * self.emb_scale  # type: ignore
@@ -1058,7 +1061,7 @@ class RavenForCausalLM(RavenPreTrainedModel, GenerationMixin):
         else:
             return self.core_block_forward(*args)
 
-    """"------------------------------------------Generation Utilities from here----------------------------------"""
+    """ ------------------------------------------Generation Utilities from here---------------------------------- """
 
     def prepare_inputs_for_generation(
         self,
@@ -1108,12 +1111,16 @@ class RavenForCausalLM(RavenPreTrainedModel, GenerationMixin):
 
     @torch.no_grad()
     def generate(self, *args, **kwargs):
-        """Dispatcher - use HF generate in all normal cases."""
+        """Dispatcher - use HF generate in all normal cases. Provide 'criterion' to guarantee adaptive path,
+        provide 'draft_steps' to guarantee spec decoding path, provide 'headway' to guarantee diff sampler path.
+        """
         self.generation_config = args[1] if len(args) > 1 else self.generation_config
         if any(k in kwargs for k in ("criterion", "exit_threshold", "exit_evaluator")):
             return self.generate_with_adaptive_compute(*args, **kwargs)
         elif any(k in kwargs for k in ("draft_steps", "lookahead_for_draft", "verification_threshold")):
             return self.generate_speculative(*args, **kwargs)
+        elif any(k in kwargs for k in ("headway", "state_noise_mixing", "inner_recurrence", "freeze_strategy")):
+            return self.generate_diffusion_style(*args, **kwargs)
         elif "continuous_compute" in kwargs:
             return self.generate_minimal(*args, **kwargs)
         else:
@@ -1188,7 +1195,7 @@ class RavenForCausalLM(RavenPreTrainedModel, GenerationMixin):
 
             # Get next token
             next_token_logits = outputs.logits[:, -1, :].to(copy=True, dtype=torch.float32, device=input_ids.device)
-            next_token = self._sample_next_token(next_token_logits, generation_config)
+            next_token = self._sample_next_token(next_token_logits, input_ids, generation_config)
 
             # Append token to sequence
             input_ids = torch.cat([input_ids, next_token], dim=-1)
@@ -1216,13 +1223,330 @@ class RavenForCausalLM(RavenPreTrainedModel, GenerationMixin):
         if generation_config.return_dict_in_generate:
             return GenerateDecoderOnlyOutput(
                 sequences=input_ids,  # type: ignore
-                scores=None,
+                scores={},  # type: ignore
                 logits=None,
                 attentions=None,
                 hidden_states=None,
                 past_key_values=model_kwargs.get("past_key_values"),
             )
         return input_ids
+
+    @torch.no_grad()
+    def generate_diffusion_style(
+        self,  # equal to normal generation if max_wavefront=1.0 and inner_recurrence=32
+        input_ids: torch.Tensor,
+        generation_config: Optional[GenerationConfig] = None,
+        tokenizer=None,
+        streamer=None,
+        init_scale: float = 1.0,
+        cache_lookup_strategy: str = "latest-m4-compress-s4",
+        full_prefill: bool = True,
+        ema_embeds: float = 0.1,
+        state_noise_mixing: float = 0.5,
+        inner_recurrence=4,
+        num_steps: int = 32,
+        freeze_strategy: str = "latent-diff",
+        headway: int = 1,
+        dampened_state_mixer: bool = True,
+        sqrt_mixer: bool = False,
+        continuous_compute: bool = False,
+        exit_t: float = 0.03,  # used only if freeze=adaptive=latent-diff
+        max_wavefront: int = 128,  # if set this will stop the wave expanding until more states freeze
+        max_diffusion_steps: int = 4096,  # prevent oot for badly configured hyperparam settings
+        return_analysis_tablets: bool = False,
+        return_full_state_tablet: bool = False,  # make sure to have enough RAM
+        **model_kwargs,
+    ) -> Union[torch.Tensor, dict[str, Any]]:
+        """Diffusion-style generation."""
+
+        assert input_ids.shape[0] == 1, "Only batch_size=1 supported for now"
+        model_kwargs, generation_config, max_new_tokens = self._prep_generate_args(
+            input_ids, generation_config, cache_lookup_strategy, model_kwargs
+        )
+        stop_tokens = self._get_stops(generation_config, tokenizer, model_kwargs).to(input_ids.device)
+
+        current_sequence = input_ids.clone()
+        blocked_size = max(self.config.block_size, input_ids.shape[1] + max_new_tokens + headway + full_prefill)
+        recurrence_counter_per_position = input_ids.new_zeros([1, blocked_size])
+        token_stable_per_position = input_ids.new_zeros([1, blocked_size])
+        kv_cache = model_kwargs["past_key_values"]  # reference
+
+        num_core_forward_passes = 0
+        num_tokens_forward = 0
+        num_cache_clears = 0
+        num_standing_waves = 0
+
+        if return_analysis_tablets:
+            # max_new_tokens upper as conservative estimate of steps with headway
+            shape = [(max_new_tokens + headway) * 2, blocked_size]
+            token_tablet = input_ids.new_zeros(shape, device=torch.device("cpu"))
+            frozen_tablet = input_ids.new_zeros(shape, device=torch.device("cpu"))
+            counter_tablet = input_ids.new_zeros(shape, device=torch.device("cpu"))
+            stability_tablet = input_ids.new_zeros(shape, device=torch.device("cpu"))
+            if return_full_state_tablet:
+                state_tablet = input_ids.new_zeros(
+                    [*shape, self.config.n_embd], dtype=torch.bfloat16, device=torch.device("cpu")
+                )
+
+        if full_prefill:
+            model_inputs = self.prepare_inputs_for_generation(input_ids, **model_kwargs)
+            outputs = self(**model_inputs, init_scale=init_scale, num_steps=num_steps)
+            num_core_forward_passes += 1
+            num_tokens_forward += input_ids.shape[1]
+            next_token = self._sample_next_token(outputs.logits[:, -1, :], input_ids, generation_config)
+            if streamer:
+                streamer.put(next_token.cpu())
+            frozen_tokens = current_sequence = torch.cat([input_ids, next_token], dim=-1)
+            recurrence_counter_per_position[:, : frozen_tokens.shape[1]] += num_steps
+            states = self.initialize_state(outputs.latent_states[:, -1:, :], scale=init_scale)
+        else:
+            embed_shape = [1, input_ids.shape[1], self.config.n_embd]
+            states = self.initialize_state(input_ids.new_zeros(embed_shape, dtype=torch.bfloat16), scale=init_scale)
+            frozen_tokens = input_ids.clone()
+            if max_wavefront > 0 and states.shape[1] > max_wavefront:
+                raise ValueError(
+                    f"The input prompt is too long to fit into the chosen max_wavefront memory limit. Use prefill, "
+                    f"or increase max_wavefront to at least {states.shape[1]}"
+                )
+
+        if ema_embeds > 0.0:
+            old_embeds, _ = self.embed_inputs(current_sequence)  # recompute in case of full prefill
+        if "latent" in freeze_strategy:
+            previous_states = states.clone()
+        if "latent-acceleration" in freeze_strategy:
+            previous_delta = torch.zeros_like(states)
+            prev_previous_states = torch.zeros_like(states)
+            old_old_cache_index = 0
+        old_cache_index = 0
+        old_k = k = 0
+        step = 0
+
+        while ((frozen_tokens.shape[1] - input_ids.shape[1]) < max_new_tokens) and (
+            current_sequence.shape[1] <= self.config.block_size
+        ):
+            cache_index = kv_cache.get_seq_length()
+            # print(states.shape, current_sequence.shape, frozen_tokens.shape, cache_index)
+            model_kwargs["cache_position"] = torch.arange(
+                cache_index, cache_index + states.shape[1], device=input_ids.device
+            )
+            model_inputs = self.prepare_inputs_for_generation(current_sequence, **model_kwargs)
+            aux_inputs = dict(past_key_values=kv_cache, cache_position=model_kwargs["cache_position"])
+
+            if ema_embeds > 0.0:
+                new_embeds, block_idx = self.embed_inputs(model_inputs["input_ids"], **aux_inputs)
+                matching_old_embeds = old_embeds[:, cache_index - old_cache_index :]
+                embedded_inputs = new_embeds.clone() * (1 - ema_embeds)
+                embedded_inputs[:, : matching_old_embeds.shape[1], :] += matching_old_embeds * ema_embeds
+                old_embeds = embedded_inputs.clone()
+            else:
+                embedded_inputs, block_idx = self.embed_inputs(model_inputs["input_ids"], **aux_inputs)
+
+            if state_noise_mixing > 0:
+                rand_states = self.initialize_state(states, scale=init_scale)
+                if dampened_state_mixer:
+                    active_region = recurrence_counter_per_position[:, cache_index : cache_index + states.shape[1]]
+                    state_noise = (state_noise_mixing / (1 + active_region))[:, :, None].to(dtype=states.dtype)
+                else:  # constant
+                    state_noise = torch.as_tensor(state_noise_mixing, device=states.device, dtype=states.dtype)
+                if sqrt_mixer:
+                    states = states * F.relu(1 - state_noise).sqrt() + state_noise.sqrt() * rand_states
+                else:
+                    states = states * (1 - state_noise) + state_noise * rand_states
+            for substep in range(inner_recurrence):
+                states, block_idx, _ = self.iterate_one_step(embedded_inputs, states, block_idx=block_idx, **aux_inputs)
+                recurrence_counter_per_position[:, cache_index : cache_index + states.shape[1]] += 1
+                num_core_forward_passes += 1
+                num_tokens_forward += states.shape[1]
+
+            output = self.predict_from_latents(states, **aux_inputs)
+            all_logits: torch.Tensor = output.logits  # type: ignore
+            # remove 1) frozen_tokens, but 2) account for the logit vector being cache_index shorter than
+            # the full logits vector, and subtract -1 because we are decoding from the last position as well
+            final_logits = all_logits[0, max(frozen_tokens.shape[1] - 1 - cache_index, 0) :, :]  # type: ignore
+            new_tokens = self._sample_next_token(final_logits, frozen_tokens, generation_config).T  # +1 toks here
+            potential_edits = torch.cat([frozen_tokens, new_tokens[:, :-1]], dim=1)
+            token_stable_per_position[:, : current_sequence.shape[1]] += current_sequence == potential_edits
+            extra_tokens = torch.randint(0, 65510, (1, headway - 1), device=input_ids.device)  # + h-1 toks here
+
+            # frozen tokens + generated/guessed tokens
+            current_sequence = torch.cat([frozen_tokens, new_tokens, extra_tokens], dim=1)
+            if continuous_compute and states.shape[1] >= headway:
+                new_position_state = states[:, -headway:].clone()
+            else:
+                new_position_state = self.initialize_state(
+                    input_ids.new_zeros([1, headway, self.config.n_embd], dtype=torch.bfloat16),
+                    scale=init_scale,
+                )
+            states = torch.cat([states, new_position_state], dim=1)
+
+            if max_wavefront > 0:
+                states_extent = states.shape[1]
+                if states_extent > max_wavefront:
+                    positions_kept = max_wavefront - (states_extent - headway)
+                    headway_in_step = positions_kept
+                    states = states[:, :max_wavefront]
+                    current_sequence = current_sequence[:, : cache_index + max_wavefront]
+                    num_standing_waves += 1
+                else:
+                    headway_in_step = headway
+            else:
+                headway_in_step = headway
+
+            # Note for this block that state.shape and current_sequence.shape have already advanced by headway many toks
+            if "latent" in freeze_strategy:
+                matching_prev_states = previous_states[:, cache_index - old_cache_index :]
+                match_states = states[:, : matching_prev_states.shape[1], :]
+                if freeze_strategy == "latent-diff":
+                    criterion = (match_states - matching_prev_states).norm(dim=-1) / match_states.norm(dim=-1)
+                elif freeze_strategy == "latent-acceleration-1":  # latent-acceleration
+                    delta = match_states - matching_prev_states
+                    min_len = min(delta.shape[1], previous_delta.shape[1])
+                    matching_delta = delta[:, :min_len, :]
+                    matching_prev_delta = previous_delta[:, :min_len, :]
+                    acceleration = matching_delta - matching_prev_delta
+
+                    # Normalize by state norm, did not converge when normalizing by velocity norms
+                    normalization_term = match_states[:, :min_len, :].norm(dim=-1)
+                    criterion = acceleration.norm(dim=-1) / normalization_term
+                    previous_delta = delta.clone()
+
+                elif freeze_strategy == "latent-acceleration-2":
+                    # Find the intersection of all three ranges.
+                    intersection_start = max(cache_index, old_cache_index, old_old_cache_index)
+                    intersection_end = min(
+                        cache_index + states.shape[1],
+                        old_cache_index + previous_states.shape[1],
+                        old_old_cache_index + prev_previous_states.shape[1],
+                    )
+
+                    # Calculate the relative slices for each tensor to get aligned views.
+                    slice_curr = states[:, intersection_start - cache_index : intersection_end - cache_index]
+                    slice_prev = previous_states[
+                        :, intersection_start - old_cache_index : intersection_end - old_cache_index
+                    ]
+                    slice_prev_prev = prev_previous_states[
+                        :, intersection_start - old_old_cache_index : intersection_end - old_old_cache_index
+                    ]
+                    acceleration = (slice_curr - slice_prev) - (slice_prev - slice_prev_prev)
+                    # Normalize by state norm
+                    normalization_term = slice_curr.norm(dim=-1)
+                    criterion = acceleration.norm(dim=-1) / (normalization_term + 1e-6)
+                else:
+                    raise ValueError()
+
+                new_exits = criterion < exit_t
+                if new_exits.sum() > 0:
+                    k = cache_index + new_exits.nonzero()[-1][1].item() + 1
+                    kv_cache.clear_last_k_entries(current_sequence.shape[1] - headway_in_step - k + 1)
+                    num_cache_clears += current_sequence.shape[1] - headway_in_step - k + 1
+                    states = states[:, k - cache_index - 1 :, :]  # k or k-1
+                    frozen_tokens = current_sequence[:, :k]
+                    if streamer:
+                        streamer.put(frozen_tokens[:, old_k:k].cpu())
+                else:
+                    kv_cache.clear_last_k_entries(states.shape[1] - headway_in_step)
+                    num_cache_clears += states.shape[1] - headway_in_step
+
+            elif freeze_strategy == "token-stability":
+                if torch.any(token_stable_per_position > num_steps // inner_recurrence):
+                    # latest freezable pos:
+                    k = (token_stable_per_position > num_steps // inner_recurrence).nonzero()[-1][1].item() + 1
+                    kv_cache.clear_last_k_entries(current_sequence.shape[1] - headway_in_step - k + 1)
+                    num_cache_clears += current_sequence.shape[1] - headway_in_step - k + 1
+                    states = states[:, k - cache_index - 1 :, :]  # k or k-1
+                    frozen_tokens = current_sequence[:, :k]
+                    if streamer:
+                        streamer.put(frozen_tokens[:, old_k:k].cpu())
+                else:
+                    kv_cache.clear_last_k_entries(states.shape[1] - headway_in_step)
+                    num_cache_clears += states.shape[1] - headway_in_step
+                    k = 0
+            elif freeze_strategy == "fixed":
+                if step > (num_steps // inner_recurrence):  # start adding to frozen state after num_steps
+                    kv_cache.clear_last_k_entries(states.shape[1] - headway - headway_in_step)
+                    num_cache_clears += states.shape[1] - headway - headway_in_step
+                    states = states[:, headway_in_step:, :]
+                    frozen_tokens = torch.cat([frozen_tokens, new_tokens[:, :headway_in_step]], dim=-1)
+                    if streamer:
+                        streamer.put(new_tokens[:, :headway_in_step].cpu())
+                else:
+                    kv_cache.clear_last_k_entries(states.shape[1] - headway_in_step)  #
+                    num_cache_clears += states.shape[1] - headway_in_step
+            else:
+                raise ValueError(f"Invalid freeze strategy {freeze_strategy}")
+
+            if step > num_steps:
+                if stop_tokens is not None:
+                    if "latent" in freeze_strategy:
+                        token_stop = any(f in stop_tokens for f in frozen_tokens[0, old_k:k].tolist())
+                    else:
+                        token_stop = any(f in stop_tokens for f in frozen_tokens[0, -headway:].tolist())
+                else:
+                    token_stop = False
+
+                if "stopping_criteria" in model_kwargs:
+                    crit_stop = model_kwargs["stopping_criteria"](frozen_tokens, None)
+                else:
+                    crit_stop = False
+                if token_stop or crit_stop:
+                    break
+            if step > max_diffusion_steps:
+                break
+
+            if return_analysis_tablets and step < token_tablet.shape[0]:
+                token_tablet[step, : current_sequence.shape[1]] = current_sequence.cpu()
+                frozen_tablet[step, : frozen_tokens.shape[1]] = frozen_tokens.cpu()
+                counter_tablet[step] = recurrence_counter_per_position.cpu()
+                stability_tablet[step] = token_stable_per_position.cpu()
+                if return_full_state_tablet:
+                    state_tablet[step, cache_index : cache_index + states.shape[1]] = states[0].cpu()
+
+            if "latent-acceleration" in freeze_strategy:
+                prev_previous_states = previous_states.clone()
+                old_old_cache_index = old_cache_index
+            if "latent" in freeze_strategy:
+                previous_states = states.clone()
+            old_cache_index = cache_index
+            step += 1
+            old_k = k
+
+        if streamer:
+            streamer.end()
+
+        if return_analysis_tablets:
+            analysis_data = dict(  # package analysis data
+                last_step=step,
+                last_recurrence=step * inner_recurrence,
+                longest_token=current_sequence.shape[1],
+                token_tablet=token_tablet,  # .repeat_interleave(inner_recurrence, dim=0),
+                frozen_tablet=frozen_tablet,  # .repeat_interleave(inner_recurrence, dim=0),
+                counter_tablet=counter_tablet,  # .repeat_interleave(inner_recurrence, dim=0),
+                stability_tablet=stability_tablet,  # .repeat_interleave(inner_recurrence, dim=0),
+                state_tablet=state_tablet if return_full_state_tablet else None,
+            )
+
+        summary_scores = {
+            "num_core_forward_passes": num_core_forward_passes,
+            "num_tokens_forward": num_tokens_forward,
+            "num_cache_clears": num_cache_clears,
+            "num_standing_waves": num_standing_waves,
+            "diffusion_steps": step,
+            "gen_seq_length": current_sequence.shape[1],
+            "len_prefill": input_ids.shape[1],
+            "recurrence_per_position": recurrence_counter_per_position[:, : frozen_tokens.shape[1]].cpu(),
+            "token_stable_per_position": token_stable_per_position[:, : frozen_tokens.shape[1]].cpu(),
+        }
+
+        if generation_config.return_dict_in_generate:
+            return GenerateDecoderOnlyOutput(
+                sequences=frozen_tokens,  # type: ignore
+                scores=summary_scores,  # type: ignore
+                logits=None,
+                attentions=None,
+                hidden_states=analysis_data if return_analysis_tablets else None,  # type: ignore
+                past_key_values=model_kwargs.get("past_key_values"),
+            )
+        return frozen_tokens
 
     @torch.no_grad()
     def generate_with_adaptive_compute(
@@ -1377,7 +1701,7 @@ class RavenForCausalLM(RavenPreTrainedModel, GenerationMixin):
             compute_steps.append([compute_steps_per_seq, exit_values_per_seq])
 
             # Sample or select next token based on generation config
-            next_token = self._sample_next_token(next_token_logits, generation_config)
+            next_token = self._sample_next_token(next_token_logits, input_ids, generation_config)
 
             # Append token to sequence
             input_ids = torch.cat([input_ids, next_token], dim=-1)
@@ -1409,9 +1733,13 @@ class RavenForCausalLM(RavenPreTrainedModel, GenerationMixin):
             streamer.end()
 
         if generation_config.return_dict_in_generate:
+            steps_taken, exit_values = zip(*compute_steps)
             return GenerateDecoderOnlyOutput(
                 sequences=input_ids,  # type: ignore
-                scores=compute_steps,  # type: ignore
+                scores={
+                    # "compute_steps": torch.tensor(steps_taken),
+                    # "exit_values": torch.tensor([e[0][-1] for e in exit_values]),
+                },  # type: ignore
                 logits=None,
                 attentions=None,
                 hidden_states=None,
@@ -1454,9 +1782,7 @@ class RavenForCausalLM(RavenPreTrainedModel, GenerationMixin):
         if model_kwargs["past_key_values"].get_seq_length() == 0:
             model_inputs = self.prepare_inputs_for_generation(input_ids, **model_kwargs)
             outputs = self(**model_inputs, num_steps=num_steps, init_scale=init_scale)
-            next_token = self._sample_next_token(
-                outputs.logits[:, -1, :].to(copy=True, dtype=torch.float32), generation_config
-            )
+            next_token = self._sample_next_token(outputs.logits[:, -1, :], input_ids, generation_config)
             input_ids = torch.cat([input_ids, next_token], dim=-1)
             tokens_generated += 1
             if streamer:
@@ -1479,8 +1805,8 @@ class RavenForCausalLM(RavenPreTrainedModel, GenerationMixin):
             for _ in range(lookahead_for_draft):
                 model_inputs = self.prepare_inputs_for_generation(drafted_inputs, **model_kwargs)
                 outputs = self(**model_inputs, num_steps=draft_steps, init_scale=init_scale)
-                next_token_logits = outputs.logits[:, -1, :].to(copy=True, dtype=torch.float32)
-                next_token = self._sample_next_token(next_token_logits, generation_config)
+                next_token_logits = outputs.logits[:, -1, :]
+                next_token = self._sample_next_token(next_token_logits, drafted_inputs, generation_config)
                 drafted_inputs = torch.cat([drafted_inputs, next_token], dim=-1)
                 model_kwargs["cache_position"] = model_kwargs["cache_position"][-1:] + 1
                 if continuous_compute:
@@ -1521,8 +1847,8 @@ class RavenForCausalLM(RavenPreTrainedModel, GenerationMixin):
                 if not_all_matched[i] and seq_acceptance < lookahead_for_draft:
                     # Accept up to mismatch + sample final token
                     accepted_part = drafted_inputs[i : i + 1, current_len : current_len + seq_acceptance]
-                    final_token_logits = outputs.logits[i : i + 1, seq_acceptance, :].to(copy=True, dtype=torch.float32)
-                    final_token = self._sample_next_token(final_token_logits, generation_config)
+                    final_token_logits = outputs.logits[i : i + 1, seq_acceptance, :]
+                    final_token = self._sample_next_token(final_token_logits, input_ids, generation_config)
                     seq_tokens = torch.cat([accepted_part, final_token], dim=-1) if seq_acceptance > 0 else final_token
                 else:
                     # Accept all drafted tokens
@@ -1592,7 +1918,7 @@ class RavenForCausalLM(RavenPreTrainedModel, GenerationMixin):
         if generation_config.return_dict_in_generate:
             return GenerateDecoderOnlyOutput(
                 sequences=input_ids,  # type: ignore
-                scores=accepted_tokens,  # type: ignore
+                scores={},  # "accepted_tokens": torch.as_tensor(accepted_tokens)},  # type: ignore
                 logits=None,
                 attentions=None,
                 hidden_states=None,
@@ -1615,11 +1941,14 @@ class RavenForCausalLM(RavenPreTrainedModel, GenerationMixin):
                 stop_tokens.add(token_id)
         return torch.tensor(list(stop_tokens))
 
-    def _sample_next_token(self, next_token_logits, generation_config):
+    def _sample_next_token(self, next_token_logits, input_ids, generation_config):
         """Helper function to sample the next token."""
+        if generation_config.repetition_penalty is not None and generation_config.repetition_penalty != 1.0:
+            next_token_logits = self._apply_repetition_penalty(next_token_logits, input_ids, generation_config)
         if generation_config.do_sample:
+            next_token_logits = next_token_logits.to(copy=True, dtype=torch.float32)
             if generation_config.temperature:
-                next_token_logits = next_token_logits.float() / generation_config.temperature
+                next_token_logits = next_token_logits / generation_config.temperature
 
             probs = F.softmax(next_token_logits, dim=-1)
 
@@ -1658,6 +1987,87 @@ class RavenForCausalLM(RavenPreTrainedModel, GenerationMixin):
             return torch.multinomial(probs, num_samples=1)
         else:
             return torch.argmax(next_token_logits, dim=-1, keepdim=True)
+
+    def _apply_repetition_penalty(self, original_logits, input_ids, generation_config, use_candidates=False):
+        # Determine the actual structure
+        if original_logits.dim() == 2:
+            if original_logits.shape[0] == input_ids.shape[0]:
+                logits = original_logits.unsqueeze(1).to(copy=True, dtype=torch.float32)
+            else:
+                logits = original_logits.unsqueeze(0).to(copy=True, dtype=torch.float32)
+        else:
+            logits = original_logits.clone()
+        batch_size, num_tokens, vocab_size = logits.shape
+
+        if hasattr(generation_config, "dry_multiplier") and generation_config.dry_multiplier > 0:
+            # DRY penalty - penalizes n-gram repetitions
+            multiplier = getattr(generation_config, "dry_multiplier", 0.8)
+            base = getattr(generation_config, "dry_base", 1.75)
+            allowed_length = getattr(generation_config, "dry_allowed_length", 2)
+
+            for batch_idx in range(batch_size):
+                sequence = input_ids[batch_idx]
+
+                # For each token position we're generating
+                for token_pos in range(num_tokens):
+                    # Build context including previously generated tokens in this batch
+                    if use_candidates:
+                        candidate_tokens = logits[batch_idx, :, :].argmax(dim=-1)
+                        context = torch.cat([sequence, candidate_tokens])
+                    else:
+                        context = sequence
+
+                    context_len = len(context)
+
+                    # Check each possible next token
+                    for vocab_idx in range(vocab_size):
+                        max_match = 0
+
+                        # Look for matching sequences in recent context
+                        search_start = max(0, context_len - 128)
+                        for start_pos in range(search_start, context_len - 1):
+                            # Count matching tokens
+                            match_len = 0
+                            while (
+                                start_pos + match_len < context_len
+                                and match_len < 32
+                                and context[start_pos + match_len] == context[context_len - match_len - 1]
+                            ):
+                                match_len += 1
+
+                            # Would this token continue the match?
+                            if match_len > 0 and start_pos + match_len < context_len:
+                                next_in_pattern = context[start_pos + match_len]
+                                if next_in_pattern == vocab_idx:
+                                    max_match = max(max_match, match_len + 1)
+
+                        # Apply exponential penalty for long matches
+                        if max_match >= allowed_length:
+                            penalty = multiplier * (base ** (max_match - allowed_length))
+                            logits[batch_idx, token_pos, vocab_idx] -= penalty
+
+        else:  # Standard repetition penalty
+            penalty = generation_config.repetition_penalty
+            for batch_idx in range(batch_size):
+                # Get unique tokens that have appeared
+                sequence = input_ids[batch_idx]
+                if use_candidates:
+                    candidate_tokens = logits[batch_idx, :, :].argmax(dim=-1)
+                    sequence = torch.cat([sequence, candidate_tokens])
+                unique_tokens = torch.unique(sequence)
+
+                for token_pos in range(num_tokens):
+                    token_logits = logits[batch_idx, token_pos, unique_tokens]
+                    penalized_logits = torch.where(token_logits < 0, token_logits * penalty, token_logits / penalty)
+                    logits[batch_idx, token_pos, unique_tokens] = penalized_logits
+
+        if original_logits.dim() == 2:
+            if original_logits.shape[0] == input_ids.shape[0]:
+                return logits.squeeze(1)  # [batch_size, vocab_size]
+            else:
+                return logits.squeeze(0)  # [num_tokens, vocab_size]
+        else:
+            return logits
 
 
 ################################ Model Utils #######################################################################
@@ -1718,8 +2128,9 @@ class NoOpExitEvaluator(PerIterationExitEvaluator):
 class EntropyDiffExitEvaluator(PerIterationExitEvaluator):
     """Exit based on change in output entropy."""
 
-    def __init__(self, exit_threshold: Union[str, float] = "auto"):
+    def __init__(self, exit_threshold: Union[str, float] = "auto", reduce: bool = True):
         self.exit_threshold = 1e-3 if exit_threshold == "auto" else float(exit_threshold)
+        self.reduce = reduce
 
     def init(self, initial_latents: torch.Tensor):
         batch_size = initial_latents.shape[0]
@@ -1728,7 +2139,7 @@ class EntropyDiffExitEvaluator(PerIterationExitEvaluator):
     def check(self, model: "RavenForCausalLM", latents: torch.Tensor, aux_inputs: dict) -> Exit:
         outputs = model.predict_from_latents(latents, **aux_inputs)
         logits: torch.Tensor = outputs.logits  # type: ignore
-        probs = F.softmax(logits[:, -1, :], dim=-1)
+        probs = F.softmax(logits[:, -1, :], dim=-1) if self.reduce else F.softmax(logits, dim=-1)
         entropy = -torch.sum(probs * torch.log(probs + 1e-10), dim=-1)
         exit_values = (entropy - self.prev_entropy).abs()
         self.prev_entropy = entropy
@@ -1738,14 +2149,17 @@ class EntropyDiffExitEvaluator(PerIterationExitEvaluator):
 class LatentDiffExitEvaluator(PerIterationExitEvaluator):
     """Exit based on change in latent states."""
 
-    def __init__(self, exit_threshold: Union[str, float] = "auto"):
+    def __init__(self, exit_threshold: Union[str, float] = "auto", reduce: bool = True):
         self.exit_threshold = 0.03 if exit_threshold == "auto" else float(exit_threshold)
+        self.reduce = reduce
 
     def init(self, initial_latents: torch.Tensor):
         self.prev_latents = initial_latents.clone().detach()
 
     def check(self, model: "RavenForCausalLM", latents: torch.Tensor, aux_inputs: dict) -> Exit:
-        exit_values = ((latents - self.prev_latents).norm(dim=-1) / latents.norm(dim=-1)).mean(dim=-1)
+        exit_values = (latents - self.prev_latents).norm(dim=-1) / latents.norm(dim=-1)
+        if self.reduce:
+            exit_values = exit_values.mean(dim=-1)
         self.prev_latents = latents.clone().detach()
         return exit_values < self.exit_threshold, None, exit_values
 
@@ -1753,9 +2167,10 @@ class LatentDiffExitEvaluator(PerIterationExitEvaluator):
 class KLExitEvaluator(PerIterationExitEvaluator):
     """Exit based on KL divergence between successive outputs."""
 
-    def __init__(self, model: "RavenForCausalLM", exit_threshold: Union[str, float] = "auto"):
+    def __init__(self, model: "RavenForCausalLM", exit_threshold: Union[str, float] = "auto", reduce: bool = True):
         self.exit_threshold = 0.001 if exit_threshold == "auto" else float(exit_threshold)
         self.V = model.config.padded_vocab_size
+        self.reduce = reduce
 
     def init(self, initial_latents: torch.Tensor):
         batch_size = initial_latents.shape[0]
@@ -1764,7 +2179,7 @@ class KLExitEvaluator(PerIterationExitEvaluator):
     def check(self, model: "RavenForCausalLM", latents: torch.Tensor, aux_inputs: dict) -> Exit:
         outputs = model.predict_from_latents(latents, **aux_inputs)
         logits: torch.Tensor = outputs.logits  # type: ignore
-        log_probs = F.log_softmax(logits[:, -1, :].float(), dim=-1)
+        log_probs = F.log_softmax(logits[:, -1, :], dim=-1) if self.reduce else F.log_softmax(logits, dim=-1)
         exit_values = F.kl_div(log_probs, self.prev_log_probs, reduction="none", log_target=True).sum(dim=-1)
         self.prev_log_probs = log_probs
         return exit_values < self.exit_threshold, outputs, exit_values
@@ -1773,16 +2188,17 @@ class KLExitEvaluator(PerIterationExitEvaluator):
 class MinKLExitEvaluator(PerIterationExitEvaluator):
     """Exit based on min-p filtered KL divergence."""
 
-    def __init__(self, model: "RavenForCausalLM", exit_threshold: Union[str, float] = "auto"):
+    def __init__(self, model: "RavenForCausalLM", exit_threshold: Union[str, float] = "auto", reduce: bool = True):
         self.exit_threshold = 1e-5 if exit_threshold == "auto" else float(exit_threshold)
         self.V = model.config.padded_vocab_size
+        self.reduce = reduce
 
     def init(self, initial_latents: torch.Tensor):
         batch_size = initial_latents.shape[0]
         self.prev_log_probs = ((1 / self.V) * torch.ones(batch_size, self.V, device=initial_latents.device)).log()
 
     def _calc_minp_log_probs(self, logits: torch.Tensor) -> torch.Tensor:
-        probs = F.softmax(logits[:, -1, :], dim=-1)
+        probs = F.softmax(logits[:, -1, :], dim=-1) if self.reduce else F.softmax(logits, dim=-1)
         max_probs = probs.max(dim=-1, keepdim=True)[0]
         probs_mask = probs < (0.1 * max_probs)
         masked_probs = probs
@@ -1802,8 +2218,9 @@ class MinKLExitEvaluator(PerIterationExitEvaluator):
 class ArgmaxStabilityExitEvaluator(PerIterationExitEvaluator):
     """Exit based on argmax stability over consecutive steps."""
 
-    def __init__(self, exit_threshold: Union[str, int] = "auto"):
+    def __init__(self, exit_threshold: Union[str, int] = "auto", reduce: bool = True):
         self.exit_threshold = 5 if exit_threshold == "auto" else int(exit_threshold)
+        self.reduce = reduce
 
     def init(self, initial_latents: torch.Tensor):
         batch_size = initial_latents.shape[0]
@@ -1813,7 +2230,7 @@ class ArgmaxStabilityExitEvaluator(PerIterationExitEvaluator):
     def check(self, model: "RavenForCausalLM", latents: torch.Tensor, aux_inputs: dict) -> Exit:
         outputs = model.predict_from_latents(latents, **aux_inputs)
         logits: torch.Tensor = outputs.logits  # type: ignore
-        current_argmax = logits[:, -1, :].argmax(dim=-1)
+        current_argmax = logits[:, -1, :].argmax(dim=-1) if self.reduce else logits.argmax(dim=-1)
         stable_for_n_steps = torch.where(
             current_argmax == self.prev_argmax, self.stable_for_n_steps + 1, torch.zeros_like(self.stable_for_n_steps)
         )
@@ -1826,16 +2243,17 @@ class ArgmaxStabilityExitEvaluator(PerIterationExitEvaluator):
 class CosineExitEvaluator(PerIterationExitEvaluator):
     """Exit based on cosine similarity between successive latent states."""
 
-    def __init__(self, exit_threshold: Union[str, float] = "auto"):
+    def __init__(self, exit_threshold: Union[str, float] = "auto", reduce: bool = True):
         self.exit_threshold = 1e-3 if exit_threshold == "auto" else float(exit_threshold)
+        self.reduce = reduce
 
     def init(self, initial_latents: torch.Tensor):
         self.prev_latents = initial_latents.clone().detach()
 
     def check(self, model: "RavenForCausalLM", latents: torch.Tensor, aux_inputs: dict) -> Exit:
-        cosine_sim = (
-            (latents * self.prev_latents).sum(dim=-1) / latents.norm(dim=-1) / self.prev_latents.norm(dim=-1)
-        ).mean(dim=1)
+        cosine_sim = (latents * self.prev_latents).sum(dim=-1) / latents.norm(dim=-1) / self.prev_latents.norm(dim=-1)
+        if self.reduce:
+            cosine_sim = cosine_sim.mean(dim=1)
         exit_values = 1 - cosine_sim
         self.prev_latents = latents.clone().detach()
         return exit_values < self.exit_threshold, None, exit_values
@@ -1864,22 +2282,25 @@ class NumStepsGenerator(PerIterationExitEvaluator):
 
 
 def get_adaptive_exit_evaluator(
-    model: "RavenForCausalLM", criterion: str, exit_threshold: Union[str, float, int]
+    model: "RavenForCausalLM",
+    criterion: str,
+    exit_threshold: Union[str, float, int],
+    reduce: bool = True,
 ) -> PerIterationExitEvaluator:
     """Factory function to create appropriate exit evaluator."""
     if criterion == "entropy-diff":
-        return EntropyDiffExitEvaluator(exit_threshold)
+        return EntropyDiffExitEvaluator(exit_threshold, reduce)
     elif criterion == "latent-diff":
-        return LatentDiffExitEvaluator(exit_threshold)
+        return LatentDiffExitEvaluator(exit_threshold, reduce)
     elif criterion == "cosine":
-        return CosineExitEvaluator(exit_threshold)
+        return CosineExitEvaluator(exit_threshold, reduce)
     elif "kl" in criterion:
         if criterion == "minp-kl":
-            return MinKLExitEvaluator(model, exit_threshold)
+            return MinKLExitEvaluator(model, exit_threshold, reduce)
         else:
-            return KLExitEvaluator(model, exit_threshold)
+            return KLExitEvaluator(model, exit_threshold, reduce)
     elif criterion == "argmax-stability":
-        return ArgmaxStabilityExitEvaluator(exit_threshold)  # type: ignore
+        return ArgmaxStabilityExitEvaluator(exit_threshold, reduce)  # type: ignore
     elif criterion == "none":
         return NoOpExitEvaluator()
     else:
